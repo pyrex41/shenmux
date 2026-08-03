@@ -34,6 +34,21 @@ int zmq_msg_recv(zmq_msg_t *msg, void *socket, int flags);
 int zmq_errno(void);
 const char *zmq_strerror(int errnum);
 
+// Capture ZeroMQ's thread-local errno in the same C call as the operation.
+// Calling zmq_errno from a separate cgo call can run on a different OS thread
+// on Darwin and produce an unrelated error value.
+static int shenmux_msg_send(zmq_msg_t *msg, void *socket, int flags, int *errnum) {
+    int result = zmq_msg_send(msg, socket, flags);
+    if (result < 0 && errnum != NULL) *errnum = zmq_errno();
+    return result;
+}
+
+static int shenmux_msg_recv(zmq_msg_t *msg, void *socket, int flags, int *errnum) {
+    int result = zmq_msg_recv(msg, socket, flags);
+    if (result < 0 && errnum != NULL) *errnum = zmq_errno();
+    return result;
+}
+
 static void shenmux_copy(void *dst, const void *src, size_t n) {
     if (n != 0) memcpy(dst, src, n);
 }
@@ -284,9 +299,10 @@ func (s *Socket) SendMultipart(frames [][]byte, flags int) error {
 		if i+1 < len(frames) {
 			sendFlags |= SndMore
 		}
-		if C.zmq_msg_send(&msg, ptr, C.int(sendFlags)) < 0 {
+		var sendErr C.int
+		if C.shenmux_msg_send(&msg, ptr, C.int(sendFlags), &sendErr) < 0 {
 			_ = C.zmq_msg_close(&msg)
-			return lastError("msg_send")
+			return errorFromCode("msg_send", int(sendErr))
 		}
 		if C.zmq_msg_close(&msg) != 0 {
 			return lastError("msg_close")
@@ -323,14 +339,15 @@ func (s *Socket) RecvMultipartLimit(flags, maxFrame, maxFrames int) ([][]byte, e
 			// multipart message is immediately available.
 			recvFlags &^= DontWait
 		}
-		if C.zmq_msg_recv(&msg, ptr, C.int(recvFlags)) < 0 {
-			// Capture errno before closing the message; libzmq may update
-			// errno during zmq_msg_close on interrupted receives.
-			code := int(C.zmq_errno())
+		var recvErr C.int
+		if C.shenmux_msg_recv(&msg, ptr, C.int(recvFlags), &recvErr) < 0 {
+			// The shim captures errno before this message is closed and while
+			// still on the same OS thread as zmq_msg_recv.
 			_ = C.zmq_msg_close(&msg)
 			// Signals such as SIGCHLD can interrupt libzmq even when the
 			// receive is non-blocking. Retry the same frame; callers should
 			// only observe transport errors that cannot be recovered this way.
+			code := int(recvErr)
 			if code == int(C.EINTR) {
 				continue
 			}
