@@ -105,7 +105,10 @@ func (e *Error) Error() string {
 }
 
 func lastError(operation string) error {
-	code := int(C.zmq_errno())
+	return errorFromCode(operation, int(C.zmq_errno()))
+}
+
+func errorFromCode(operation string, code int) error {
 	if code == int(C.EAGAIN) {
 		return ErrWouldBlock
 	}
@@ -321,8 +324,23 @@ func (s *Socket) RecvMultipartLimit(flags, maxFrame, maxFrames int) ([][]byte, e
 			recvFlags &^= DontWait
 		}
 		if C.zmq_msg_recv(&msg, ptr, C.int(recvFlags)) < 0 {
+			// Capture errno before closing the message; libzmq may update
+			// errno during zmq_msg_close on interrupted receives.
+			code := int(C.zmq_errno())
 			_ = C.zmq_msg_close(&msg)
-			return nil, lastError("msg_recv")
+			// Signals such as SIGCHLD can interrupt libzmq even when the
+			// receive is non-blocking. Retry the same frame; callers should
+			// only observe transport errors that cannot be recovered this way.
+			if code == int(C.EINTR) {
+				continue
+			}
+			// Some Darwin/libzmq combinations report ETIMEDOUT for a
+			// nonblocking receive with no message. DONTWAIT makes this the
+			// same recoverable condition as EAGAIN.
+			if recvFlags&DontWait != 0 && code == int(C.ETIMEDOUT) {
+				return nil, ErrWouldBlock
+			}
+			return nil, errorFromCode("msg_recv", code)
 		}
 		size := int(C.zmq_msg_size(&msg))
 		if size < 0 || size > maxFrame {

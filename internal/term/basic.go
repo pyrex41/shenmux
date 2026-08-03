@@ -787,10 +787,10 @@ func parseExtendedColor(params []int) (screen.Color, int) {
 
 func ansiColor(index int) screen.Color {
 	palette := [...]screen.Color{
-		{true, 0, 0, 0}, {true, 205, 49, 49}, {true, 13, 188, 121}, {true, 229, 229, 16},
-		{true, 36, 114, 200}, {true, 188, 63, 188}, {true, 17, 168, 205}, {true, 229, 229, 229},
-		{true, 102, 102, 102}, {true, 241, 76, 76}, {true, 35, 209, 139}, {true, 245, 245, 67},
-		{true, 59, 142, 234}, {true, 214, 112, 214}, {true, 41, 184, 219}, {true, 255, 255, 255},
+		{Valid: true, R: 0, G: 0, B: 0}, {Valid: true, R: 205, G: 49, B: 49}, {Valid: true, R: 13, G: 188, B: 121}, {Valid: true, R: 229, G: 229, B: 16},
+		{Valid: true, R: 36, G: 114, B: 200}, {Valid: true, R: 188, G: 63, B: 188}, {Valid: true, R: 17, G: 168, B: 205}, {Valid: true, R: 229, G: 229, B: 229},
+		{Valid: true, R: 102, G: 102, B: 102}, {Valid: true, R: 241, G: 76, B: 76}, {Valid: true, R: 35, G: 209, B: 139}, {Valid: true, R: 245, G: 245, B: 67},
+		{Valid: true, R: 59, G: 142, B: 234}, {Valid: true, R: 214, G: 112, B: 214}, {Valid: true, R: 41, G: 184, B: 219}, {Valid: true, R: 255, G: 255, B: 255},
 	}
 	return palette[clamp(index, 0, len(palette)-1)]
 }

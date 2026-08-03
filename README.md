@@ -56,6 +56,17 @@ make check
 make build
 ```
 
+With Nix, enter the reproducible development shell instead:
+
+```sh
+nix develop
+make check
+make build
+```
+
+The flake supplies a current Go toolchain (compatible with the module's Go 1.23
+minimum), ZeroMQ, pkg-config, and the native build tools for Linux and macOS.
+
 The normal build uses the dependency-free VT metadata tracker and the replay journal:
 
 ```sh
