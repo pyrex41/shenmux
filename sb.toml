@@ -1,0 +1,35 @@
+[project]
+lang = "go"
+pkg  = "shenguard"
+
+[paths]
+spec   = "specs/mux.shen"
+output = "internal/shenguard/guards_gen.go"
+
+[engine]
+relaxed = false
+
+[[gates]]
+name = "shengen-drift"
+kind = "command"
+run  = "./scripts/shengen-codegen.sh --check"
+
+[[gates]]
+name = "test"
+kind = "command"
+run  = "go test ./..."
+
+[[gates]]
+name = "build"
+kind = "command"
+run  = "go build ./..."
+
+[[gates]]
+name = "shen-check"
+kind = "command"
+run  = "./scripts/shen-check.sh"
+
+[[gates]]
+name = "tcb-audit"
+kind = "command"
+run  = "./scripts/shenguard-audit.sh"

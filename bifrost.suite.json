@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "name": "shenmux",
+  "root": ".",
+  "programs_dir": ".",
+  "default_cwd": ".",
+  "strip_line_prefixes": ["loaded"],
+  "cases": [
+    {
+      "name": "mux-state-machine-agreement",
+      "mode": "script",
+      "program": "tests/mux-spec.shen",
+      "expect": "agreement",
+      "marker": "ALL PASS",
+      "doc": "Attach/input/sequence/resize/exit rules agree across Shen ports."
+    }
+  ]
+}
