@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+
+session=${SHENMUX_SESSION:-work}
+control=${SHENMUX_CONTROL:-tcp://0.0.0.0:5555}
+data=${SHENMUX_DATA:-tcp://0.0.0.0:5556}
+shell=${SHENMUX_SHELL:-/bin/bash}
+shell_args=${SHENMUX_SHELL_ARGS:--il}
+
+# SHENMUX_SHELL_ARGS is intentionally whitespace-split so operators can use
+# common forms such as "-il" or "-l" without rebuilding the image.
+# shellcheck disable=SC2086
+exec /usr/local/bin/muxd \
+  -session "$session" \
+  -control "$control" \
+  -data "$data" \
+  -- "$shell" $shell_args

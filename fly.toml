@@ -1,0 +1,21 @@
+# Change this to a globally unique Fly app name before `fly deploy`.
+app = "shenmux"
+primary_region = "ord"
+
+[build]
+  dockerfile = "Dockerfile"
+
+# The Machine is intentionally not given public [[services]] entries. Use
+# `fly proxy` to forward these private ports to the local client. This keeps
+# the current unauthenticated ZeroMQ TCP transport off the public Internet.
+
+[env]
+  SHENMUX_SESSION = "work"
+  SHENMUX_CONTROL = "tcp://0.0.0.0:5555"
+  SHENMUX_DATA = "tcp://0.0.0.0:5556"
+  SHENMUX_SHELL = "/bin/bash"
+  SHENMUX_SHELL_ARGS = "-il"
+
+[[vm]]
+  memory = "512mb"
+  size = "shared-cpu-1x"

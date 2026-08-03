@@ -1,0 +1,7 @@
+.git
+.github
+.direnv
+bin
+dist
+shenmux-authoritative-state-source.zip
+*.swp

@@ -109,6 +109,43 @@ For a noninteractive smoke test:
 printf 'hello\n' | ./bin/muxctl -no-raw -session smoke
 ```
 
+## Fly.io deployment
+
+The repository includes a Dockerfile and `fly.toml` for a single long-lived
+Machine. The image binds the control and data ZeroMQ sockets to private TCP
+ports 5555 and 5556. The config intentionally does not publish raw TCP
+services; use `fly proxy` from the client machine instead.
+
+Install and authenticate with `flyctl`, change `app` in `fly.toml` to a unique
+name, then create and deploy the app:
+
+```sh
+fly launch --no-deploy
+fly deploy
+```
+
+Forward both private ports to the laptop:
+
+```sh
+fly proxy 15555:5555 -a <app-name>
+fly proxy 15556:5556 -a <app-name>
+```
+
+Keep both proxy commands running. In another local terminal, attach with:
+
+```sh
+nix develop
+./bin/muxctl -session work \
+  -control tcp://127.0.0.1:15555 \
+  -data tcp://127.0.0.1:15556
+```
+
+The default remote shell is Bash. Set `SHENMUX_SHELL=/bin/zsh` and
+`SHENMUX_SHELL_ARGS=-il` with `fly secrets` or in `[env]` if the image should
+start zsh instead. The current TCP transport has no application-level
+authentication, so do not add public TCP services until an authenticated
+transport policy is implemented.
+
 ## Shen source of truth
 
 The pure model is [specs/mux.shen](specs/mux.shen). It declares:
