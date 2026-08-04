@@ -44,6 +44,23 @@ remote TUI enables the corresponding mode. PTY output is batched in short
 windows before VT interpretation so redraw-heavy TUIs produce fewer redundant
 screen publications.
 
+The `/workspace` prototype is a browser-local workspace backed by the Origin
+Private File System (OPFS). It provides instant local file operations and a
+small command surface (`ls`, `cat`, `write`, `mkdir`, and friends). The command
+reducer is a WASI Component Model guest, transpiled for the browser with JCO.
+The guest imports a host virtual filesystem; the browser host keeps an OPFS
+cache, loads cold files with HTTP ranges, and journals writes for asynchronous
+remote sync. Remote synchronization is optional, so the default path remains
+offline/local. See [WORKSPACE-RUNTIME.md](WORKSPACE-RUNTIME.md) for the
+capability-scoped object service and Golem durability seam.
+
+The browser can opt into a remote workspace by setting
+`globalThis.__SHENMUX_WORKSPACE_REMOTE__` before loading `/workspace`:
+
+```js
+{ baseURL: "/workspace-objects", capability: "short-lived-capability" }
+```
+
 The demo shell also removes an inherited `NO_COLOR=1` setting and advertises
 `COLORTERM=truecolor`; otherwise applications such as Claude Code may disable
 color before the browser ever receives a styled cell.

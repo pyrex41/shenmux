@@ -18,10 +18,11 @@ import (
 )
 
 func TestEndToEndCanonicalStateAndExclusiveControlOverZMQ(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "ipc")
-	if err := os.Mkdir(dir, 0o700); err != nil {
+	dir, err := os.MkdirTemp("/tmp", "smx-client-")
+	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}

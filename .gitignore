@@ -2,4 +2,7 @@
 /dist/
 /web/node_modules/
 /node_modules/
+runtime/workspace-component/target/
+runtime/workspace-component/generated/
+runtime/golem-workspace/target/
 shenmux-authoritative-state-source.zip

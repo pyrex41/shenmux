@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"unicode/utf8"
 )
 
@@ -37,5 +38,13 @@ func DefaultEndpoints(session string) (control, data string, err error) {
 	}
 	dir := filepath.Join(os.TempDir(), fmt.Sprintf("shenmux-%d", os.Geteuid()))
 	base := filepath.Join(dir, session)
+	// libzmq maps ipc:// addresses to Unix-domain socket names. macOS allows
+	// fewer bytes than Linux, and Go's per-test/per-user TMPDIR can be deeply
+	// nested. Keep the normal per-user directory when it fits, otherwise use
+	// the short system temp alias while retaining the private UID directory.
+	if runtime.GOOS == "darwin" && len("ipc://"+base+".pub") >= 100 {
+		dir = filepath.Join("/tmp", fmt.Sprintf("shenmux-%d", os.Geteuid()))
+		base = filepath.Join(dir, session)
+	}
 	return "ipc://" + base + ".ctl", "ipc://" + base + ".pub", nil
 }

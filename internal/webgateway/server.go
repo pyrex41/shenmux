@@ -16,6 +16,7 @@ import (
 	"github.com/pyrex41/shenmux/client"
 	"github.com/pyrex41/shenmux/internal/protocol"
 	"github.com/pyrex41/shenmux/internal/webui"
+	workspacebackend "github.com/pyrex41/shenmux/internal/workspace"
 )
 
 const commandTimeout = 5 * time.Second
@@ -26,6 +27,11 @@ type Config struct {
 	Session         string
 	ControlEndpoint string
 	DataEndpoint    string
+	// WorkspaceStore and WorkspaceAuthorize are optional. When configured,
+	// /workspace-objects exposes the capability-scoped browser object API.
+	// Cloud credentials stay behind this handler and never reach the browser.
+	WorkspaceStore     workspacebackend.Store
+	WorkspaceAuthorize workspacebackend.Authorize
 }
 
 type Server struct {
@@ -66,6 +72,16 @@ func (s *Server) Handler() http.Handler {
 			_, _ = w.Write(data)
 			return
 		}
+		if r.URL.Path == "/workspace" || r.URL.Path == "/workspace/" {
+			data, err := webui.FS.ReadFile("workspace.html")
+			if err != nil {
+				http.Error(w, "workspace unavailable", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write(data)
+			return
+		}
 		files.ServeHTTP(w, r)
 	})
 	mux := http.NewServeMux()
@@ -74,6 +90,12 @@ func (s *Server) Handler() http.Handler {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	mux.HandleFunc("/ws", s.handleWebSocket)
+	if s.cfg.WorkspaceStore != nil {
+		objects := workspacebackend.Handler(workspacebackend.HTTPConfig{
+			Store: s.cfg.WorkspaceStore, Authorize: s.cfg.WorkspaceAuthorize,
+		})
+		mux.Handle("/workspace-objects/", http.StripPrefix("/workspace-objects", objects))
+	}
 	mux.Handle("/", muxHandler)
 	return mux
 }
