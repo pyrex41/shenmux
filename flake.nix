@@ -22,6 +22,7 @@
             go
             git
             gnumake
+            nodejs
             pkg-config
             zeromq
           ];

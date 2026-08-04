@@ -299,8 +299,17 @@ func (s *Socket) SendMultipart(frames [][]byte, flags int) error {
 		if i+1 < len(frames) {
 			sendFlags |= SndMore
 		}
-		var sendErr C.int
-		if C.shenmux_msg_send(&msg, ptr, C.int(sendFlags), &sendErr) < 0 {
+		// SIGCHLD and terminal-process signals can interrupt a libzmq send on
+		// Darwin. The message remains owned by the caller on EINTR, so retry
+		// the same frame before surfacing a transport failure.
+		for {
+			var sendErr C.int
+			if C.shenmux_msg_send(&msg, ptr, C.int(sendFlags), &sendErr) >= 0 {
+				break
+			}
+			if int(sendErr) == int(C.EINTR) {
+				continue
+			}
 			_ = C.zmq_msg_close(&msg)
 			return errorFromCode("msg_send", int(sendErr))
 		}

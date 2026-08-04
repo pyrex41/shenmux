@@ -1,0 +1,49 @@
+# Browser client prototype
+
+The prototype keeps `muxd` unchanged and puts a small WebSocket gateway in
+front of the existing Go client. The browser receives the same authoritative
+checkpoint and typed screen deltas as a native client; it never parses a PTY
+escape stream.
+
+Start the daemon in one shell, then the gateway in another:
+
+```sh
+nix develop
+./bin/muxd -session default
+go run ./cmd/shenmux-web -session default
+```
+
+Open <http://localhost:8787>. The client is shipped as one embedded browser
+bundle: PixiJS owns the GPU-backed terminal scene, while ShenScript handles the
+small command-policy layer without entering the per-cell render loop. The
+gateway is the right place to add authentication, session discovery, and a
+multi-pane layout before exposing it publicly.
+
+The bundle is reproducible from the checked-in `web/package-lock.json`:
+
+```sh
+npm install --prefix web
+npm run build --prefix web
+```
+
+When `muxd` starts without an explicit command it launches a login shell,
+preferring zsh and then fish, with a private session-local prompt config. If
+Starship is installed it initializes Starship; otherwise a compact colored
+prompt is used. Select one explicitly with `muxd -shell zsh` or
+`muxd -shell fish`.
+
+ShenScript is intentionally limited to command policy for now; the hot path
+stays in JavaScript and PixiJS. The same environment can grow into the
+session/pane state layer without changing the wire protocol.
+
+The browser also honors the terminal's typed interaction modes: alternate
+screen, truecolor, bracketed paste, focus reporting, and DEC mouse protocols
+(click, button tracking, any-event tracking, and SGR coordinates). Ordinary
+shell sessions do not receive mouse bytes; they are emitted only after the
+remote TUI enables the corresponding mode. PTY output is batched in short
+windows before VT interpretation so redraw-heavy TUIs produce fewer redundant
+screen publications.
+
+The demo shell also removes an inherited `NO_COLOR=1` setting and advertises
+`COLORTERM=truecolor`; otherwise applications such as Claude Code may disable
+color before the browser ever receives a styled cell.

@@ -23,6 +23,7 @@ func main() {
 		data    = flag.String("data", "", "ZeroMQ data endpoint (XPUB)")
 		cols    = flag.Int("cols", 80, "initial columns")
 		rows    = flag.Int("rows", 24, "initial rows")
+		shell   = flag.String("shell", "auto", "default shell when no command is supplied (auto, fish, zsh, bash, or a path)")
 		grace   = flag.Duration("exit-grace", 150*time.Millisecond, "time to leave sockets open after command exit")
 	)
 	flag.Usage = func() {
@@ -48,19 +49,24 @@ func main() {
 		log.Fatal(err)
 	}
 	command := flag.Args()
+	env := os.Environ()
 	if len(command) == 0 {
-		shell := os.Getenv("SHELL")
-		if shell == "" {
-			shell = "/bin/sh"
+		command, err = defaultShellCommand(*shell)
+		if err != nil {
+			log.Fatal(err)
 		}
-		command = []string{shell}
 	}
+	env, cleanupShell, err := prepareShellEnvironment(command, env)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer cleanupShell()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	log.Printf("shenmux session=%s control=%s data=%s command=%q", *session, *control, *data, command)
 	if err := server.Serve(ctx, server.Config{
 		Session: *session, ControlEndpoint: *control, DataEndpoint: *data,
-		Dimensions: dim, Command: command, Env: os.Environ(), ExitGrace: *grace,
+		Dimensions: dim, Command: command, Env: env, ExitGrace: *grace,
 	}); err != nil {
 		log.Fatal(err)
 	}

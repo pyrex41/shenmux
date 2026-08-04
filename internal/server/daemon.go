@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -17,6 +18,11 @@ import (
 	"github.com/pyrex41/shenmux/internal/shenguard"
 	"github.com/pyrex41/shenmux/internal/term"
 	"github.com/pyrex41/shenmux/internal/zmqx"
+)
+
+const (
+	ptyBatchWindow = 4 * time.Millisecond
+	ptyBatchBytes  = 256 << 10
 )
 
 type Config struct {
@@ -220,19 +226,97 @@ func stopAndWaitPTY(pty *ptyx.PTY, done <-chan processResult) processResult {
 }
 
 func copyPTY(runtime *Runtime, pty io.Reader) error {
-	buffer := make([]byte, 32<<10)
-	for {
-		n, err := pty.Read(buffer)
-		if n > 0 {
-			if handleErr := runtime.HandlePTYOutput(buffer[:n]); handleErr != nil {
-				return handleErr
+	// TUIs redraw the same frame in many small PTY writes. Feed the terminal
+	// engine in short batches so each burst produces one canonical delta rather
+	// than forcing a full screen diff and publication for every write.
+	type readResult struct {
+		data []byte
+		err  error
+	}
+	chunks := make(chan readResult, 4)
+	done := make(chan struct{})
+	go func() {
+		defer close(chunks)
+		buffer := make([]byte, 32<<10)
+		for {
+			n, err := pty.Read(buffer)
+			if n > 0 {
+				data := append([]byte(nil), buffer[:n]...)
+				select {
+				case chunks <- readResult{data: data, err: err}:
+				case <-done:
+					return
+				}
+				if err != nil {
+					return
+				}
+			}
+			if err != nil {
+				select {
+				case chunks <- readResult{err: err}:
+				case <-done:
+				}
+				return
 			}
 		}
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil
+	}()
+	defer close(done)
+
+	var pending bytes.Buffer
+	var timer *time.Timer
+	var timerC <-chan time.Time
+	flush := func() error {
+		if pending.Len() == 0 {
+			return nil
+		}
+		payload := append([]byte(nil), pending.Bytes()...)
+		pending.Reset()
+		return runtime.HandlePTYOutput(payload)
+	}
+	stopTimer := func() {
+		if timer == nil {
+			return
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
 			}
-			return fmt.Errorf("read PTY: %w", err)
+		}
+		timer = nil
+		timerC = nil
+	}
+	for {
+		select {
+		case result, ok := <-chunks:
+			if !ok {
+				stopTimer()
+				return flush()
+			}
+			if len(result.data) != 0 {
+				_, _ = pending.Write(result.data)
+			}
+			if pending.Len() >= ptyBatchBytes || result.err != nil {
+				stopTimer()
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			if result.err != nil {
+				if errors.Is(result.err, io.EOF) {
+					return nil
+				}
+				return fmt.Errorf("read PTY: %w", result.err)
+			}
+			if timer == nil {
+				timer = time.NewTimer(ptyBatchWindow)
+				timerC = timer.C
+			}
+		case <-timerC:
+			stopTimer()
+			if err := flush(); err != nil {
+				return err
+			}
 		}
 	}
 }

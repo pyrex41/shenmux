@@ -72,6 +72,7 @@ The normal build uses the dependency-free VT metadata tracker and the replay jou
 ```sh
 go build -o bin/muxd ./cmd/muxd
 go build -o bin/muxctl ./cmd/muxctl
+go build -o bin/shenmux-web ./cmd/shenmux-web
 ```
 
 A no-Cgo build also compiles, but its PTY and ZeroMQ constructors return an unsupported-platform error:
@@ -88,6 +89,14 @@ Start a session around the default shell:
 ./bin/muxd -session work
 ```
 
+With no command, `muxd` starts a login shell, preferring zsh, then fish, then
+the `SHELL` environment value. Choose explicitly when desired:
+
+```sh
+./bin/muxd -session work -shell fish
+./bin/muxd -session work -shell zsh
+```
+
 Or run a specific command after `--`:
 
 ```sh
@@ -99,6 +108,15 @@ Attach from another terminal:
 ```sh
 ./bin/muxctl -session work
 ```
+
+The browser client is a small WebSocket gateway and embedded PixiJS terminal.
+Run it beside `muxd`, then open `http://localhost:8787`:
+
+```sh
+./bin/shenmux-web -session work
+```
+
+See [docs/WEB.md](docs/WEB.md) for the prototype's protocol and UI notes.
 
 Press **Ctrl-]** to detach locally. The default IPC endpoints are placed in an owner-only `0700` per-UID directory under the system temporary directory, then scoped by session name. Override them with `-control` and `-data` on both commands; filesystem IPC parents must be real directories owned by the daemon UID with no group/other access. Before removing any stale socket path, the daemon acquires a persistent `0600` advisory lock sentinel for each endpoint; a second daemon targeting the same control or data path fails without disturbing the live session.
 
@@ -140,9 +158,9 @@ nix develop
   -data tcp://127.0.0.1:15556
 ```
 
-The default remote shell is Bash. Set `SHENMUX_SHELL=/bin/zsh` and
+The default remote shell is zsh. Set `SHENMUX_SHELL=/usr/bin/fish` and
 `SHENMUX_SHELL_ARGS=-il` with `fly secrets` or in `[env]` if the image should
-start zsh instead. The current TCP transport has no application-level
+start fish instead. The current TCP transport has no application-level
 authentication, so do not add public TCP services until an authenticated
 transport policy is implemented.
 

@@ -65,6 +65,25 @@ type Cursor struct {
 	Style   CursorStyle
 }
 
+// MouseMode describes the DEC mouse protocol requested by a full-screen
+// terminal application. The browser only emits mouse sequences when a mode is
+// active, so ordinary shell sessions never receive pointer bytes.
+type MouseMode uint8
+
+const (
+	MouseNone MouseMode = iota
+	MouseClick
+	MouseButton
+	MouseAny
+)
+
+type InputModes struct {
+	Mouse          MouseMode
+	MouseSGR       bool
+	BracketedPaste bool
+	FocusEvents    bool
+}
+
 // Frame is the complete authoritative visible terminal state. It contains no
 // untrusted escape stream: cells and metadata are already interpreted.
 type Frame struct {
@@ -77,6 +96,7 @@ type Frame struct {
 	WorkingDirectory string
 	DefaultFG        Color
 	DefaultBG        Color
+	Modes            InputModes
 }
 
 // State adds bounded client-visible history to the active frame. History is
@@ -105,6 +125,7 @@ type Delta struct {
 	WorkingDirectory string
 	DefaultFG        Color
 	DefaultBG        Color
+	Modes            InputModes
 	HistoryReset     bool
 	HistoryDrop      uint32
 	HistoryAppend    []Row
@@ -170,6 +191,9 @@ func (f Frame) Validate() error {
 	if f.Cursor.Style > CursorHollowBlock {
 		return fmt.Errorf("unknown cursor style %d", f.Cursor.Style)
 	}
+	if f.Modes.Mouse > MouseAny {
+		return fmt.Errorf("unknown mouse mode %d", f.Modes.Mouse)
+	}
 	if err := validateMetadata(f.Title, "title"); err != nil {
 		return err
 	}
@@ -203,6 +227,9 @@ func (d Delta) Validate() error {
 	}
 	if d.Cursor.Style > CursorHollowBlock {
 		return fmt.Errorf("unknown cursor style %d", d.Cursor.Style)
+	}
+	if d.Modes.Mouse > MouseAny {
+		return fmt.Errorf("unknown mouse mode %d", d.Modes.Mouse)
 	}
 	if err := validateMetadata(d.Title, "title"); err != nil {
 		return err
@@ -318,6 +345,7 @@ func EqualState(a, b State) bool {
 		a.Frame.WorkingDirectory == b.Frame.WorkingDirectory &&
 		a.Frame.DefaultFG == b.Frame.DefaultFG &&
 		a.Frame.DefaultBG == b.Frame.DefaultBG &&
+		a.Frame.Modes == b.Frame.Modes &&
 		equalRows(a.Frame.Lines, b.Frame.Lines) &&
 		equalRows(a.History, b.History)
 }

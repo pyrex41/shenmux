@@ -43,6 +43,24 @@ func TestBasicInterpretsScreenAndAltState(t *testing.T) {
 	}
 }
 
+func TestBasicPublishesTUIInputModesAndTrueColor(t *testing.T) {
+	terminal := NewBasic(testDim(t, 20, 4))
+	if _, err := terminal.Feed([]byte("\x1b[38;2;12;34;56mcolor\x1b[0m\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?1004h")); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := terminal.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := frame.Lines[0][0].Style.FG; got != (screen.Color{Valid: true, R: 12, G: 34, B: 56}) {
+		t.Fatalf("truecolor was not preserved: %+v", got)
+	}
+	want := screen.InputModes{Mouse: screen.MouseButton, MouseSGR: true, BracketedPaste: true, FocusEvents: true}
+	if frame.Modes != want {
+		t.Fatalf("TUI input modes mismatch: got %+v want %+v", frame.Modes, want)
+	}
+}
+
 func TestBasicGeneratesPTYResponsesExactlyAsEffects(t *testing.T) {
 	terminal := NewBasic(testDim(t, 80, 24))
 	effects, err := terminal.Feed([]byte("\x1b[10;20H\x1b[6n\x1b[c\x1b[?7$p"))

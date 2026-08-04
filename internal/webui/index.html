@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>shenmux</title>
+    <link rel="stylesheet" href="/style.css">
+  </head>
+  <body>
+    <main class="app">
+      <header class="topbar">
+        <div class="brand"><span class="dot"></span><span>shenmux</span><span class="muted" id="session">connecting</span></div>
+        <div class="actions">
+          <span class="status" id="status">offline</span>
+          <button id="acquire">take control</button>
+          <button id="release" class="secondary">release</button>
+        </div>
+      </header>
+      <section class="terminal-wrap" id="screen-wrap">
+        <div id="pixi-host"></div>
+        <div class="empty" id="empty" hidden></div>
+      </section>
+      <footer class="bottombar">
+        <span id="details">screen —</span>
+        <span class="hint">click terminal, type normally · ⌘K clears browser focus</span>
+      </footer>
+    </main>
+    <script src="/app.bundle.js" defer></script>
+  </body>
+</html>

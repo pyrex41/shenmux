@@ -32,6 +32,7 @@ func Advance(previous State, next Frame, historyLimit int) (State, Delta, error)
 		Cursor: next.Cursor, AltScreen: next.AltScreen,
 		Title: next.Title, WorkingDirectory: next.WorkingDirectory,
 		DefaultFG: next.DefaultFG, DefaultBG: next.DefaultBG,
+		Modes: next.Modes,
 	}
 
 	full := first || previous.Frame.Cols != next.Cols || previous.Frame.Rows != next.Rows || previous.Frame.AltScreen != next.AltScreen
@@ -114,6 +115,7 @@ func Apply(previous State, delta Delta, historyLimit int) (State, error) {
 	state.Frame.WorkingDirectory = delta.WorkingDirectory
 	state.Frame.DefaultFG = delta.DefaultFG
 	state.Frame.DefaultBG = delta.DefaultBG
+	state.Frame.Modes = delta.Modes
 
 	for _, line := range delta.Lines {
 		state.Frame.Lines[line.Y] = cloneRow(line.Cells)

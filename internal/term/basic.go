@@ -51,6 +51,7 @@ type Basic struct {
 	saved       cursorState
 	cursor      screen.Cursor
 	style       screen.Style
+	modes       screen.InputModes
 	wrap        bool
 	pendingWrap bool
 	scrollTop   int
@@ -116,6 +117,7 @@ func (b *Basic) Snapshot() (screen.Frame, error) {
 		Cols: b.dim.Cols(), Rows: b.dim.Rows(), Lines: cloneGrid(grid),
 		Cursor: b.cursor, AltScreen: b.alt, Title: b.title,
 		WorkingDirectory: b.pwd,
+		Modes:            b.modes,
 	}
 	frame.Cursor.X = uint16(clamp(b.x, 0, int(b.dim.Cols())-1))
 	frame.Cursor.Y = uint16(clamp(b.y, 0, int(b.dim.Rows())-1))
@@ -643,6 +645,30 @@ func (b *Basic) setModes(private bool, params []int, enabled bool) {
 				b.alt = enabled
 				b.scrollTop, b.scrollBot = 0, int(b.dim.Rows())-1
 			}
+		case 1000:
+			if enabled {
+				b.modes.Mouse = screen.MouseClick
+			} else if b.modes.Mouse == screen.MouseClick {
+				b.modes.Mouse = screen.MouseNone
+			}
+		case 1002:
+			if enabled {
+				b.modes.Mouse = screen.MouseButton
+			} else if b.modes.Mouse == screen.MouseButton {
+				b.modes.Mouse = screen.MouseNone
+			}
+		case 1003:
+			if enabled {
+				b.modes.Mouse = screen.MouseAny
+			} else if b.modes.Mouse == screen.MouseAny {
+				b.modes.Mouse = screen.MouseNone
+			}
+		case 1004:
+			b.modes.FocusEvents = enabled
+		case 1006:
+			b.modes.MouseSGR = enabled
+		case 2004:
+			b.modes.BracketedPaste = enabled
 		}
 	}
 }
@@ -678,6 +704,42 @@ func (b *Basic) reportMode(params []int, effects *Effects) {
 			}
 		case 47, 1047, 1049:
 			if b.alt {
+				state = 1
+			} else {
+				state = 2
+			}
+		case 1000:
+			if b.modes.Mouse == screen.MouseClick {
+				state = 1
+			} else {
+				state = 2
+			}
+		case 1002:
+			if b.modes.Mouse == screen.MouseButton {
+				state = 1
+			} else {
+				state = 2
+			}
+		case 1003:
+			if b.modes.Mouse == screen.MouseAny {
+				state = 1
+			} else {
+				state = 2
+			}
+		case 1004:
+			if b.modes.FocusEvents {
+				state = 1
+			} else {
+				state = 2
+			}
+		case 1006:
+			if b.modes.MouseSGR {
+				state = 1
+			} else {
+				state = 2
+			}
+		case 2004:
+			if b.modes.BracketedPaste {
 				state = 1
 			} else {
 				state = 2
@@ -865,6 +927,7 @@ func (b *Basic) reset() {
 	b.saved = cursorState{}
 	b.cursor = screen.Cursor{Visible: true, Style: screen.CursorBlock, Blink: true}
 	b.style = screen.Style{}
+	b.modes = screen.InputModes{}
 	b.wrap = true
 	b.pendingWrap = false
 	b.scrollTop, b.scrollBot = 0, int(b.dim.Rows())-1

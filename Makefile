@@ -1,14 +1,18 @@
 SHELL := /bin/bash
 BIN_DIR ?= bin
 
-.PHONY: all build test race vet guards guard-check audit shen bifrost check clean install
+.PHONY: all build web-build test race vet guards guard-check audit shen bifrost check clean install
 
 all: check build
 
-build:
+web-build:
+	npm run build --prefix web
+
+build: web-build
 	mkdir -p $(BIN_DIR)
 	go build -o $(BIN_DIR)/muxd ./cmd/muxd
 	go build -o $(BIN_DIR)/muxctl ./cmd/muxctl
+	go build -o $(BIN_DIR)/shenmux-web ./cmd/shenmux-web
 
 test:
 	go test ./...
@@ -34,13 +38,14 @@ shen:
 bifrost:
 	./scripts/run-bifrost.sh
 
-check: guard-check audit test vet
+check: web-build guard-check audit test vet
 	go build ./...
 	CGO_ENABLED=0 go build ./...
 
 install: build
 	install -m 0755 $(BIN_DIR)/muxd $(HOME)/.local/bin/muxd
 	install -m 0755 $(BIN_DIR)/muxctl $(HOME)/.local/bin/muxctl
+	install -m 0755 $(BIN_DIR)/shenmux-web $(HOME)/.local/bin/shenmux-web
 
 clean:
 	rm -rf $(BIN_DIR) dist

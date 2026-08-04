@@ -4,7 +4,7 @@ set -eu
 session=${SHENMUX_SESSION:-work}
 control=${SHENMUX_CONTROL:-tcp://0.0.0.0:5555}
 data=${SHENMUX_DATA:-tcp://0.0.0.0:5556}
-shell=${SHENMUX_SHELL:-/bin/bash}
+shell=${SHENMUX_SHELL:-/bin/zsh}
 shell_args=${SHENMUX_SHELL_ARGS:--il}
 
 # SHENMUX_SHELL_ARGS is intentionally whitespace-split so operators can use
