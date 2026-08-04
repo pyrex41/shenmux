@@ -1,0 +1,69 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: shenmux
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shenmux-controller
+  namespace: shenmux
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: shenmux-controller
+  template:
+    metadata:
+      labels:
+        app: shenmux-controller
+    spec:
+      containers:
+        - name: controller
+          image: ghcr.io/pyrex41/shenmux:latest
+          args: ["controller", "--listen", "0.0.0.0:8788", "--origin", "https://shenmux.example.com"]
+          ports:
+            - name: http
+              containerPort: 8788
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shenmux-controller
+  namespace: shenmux
+spec:
+  selector:
+    app: shenmux-controller
+  ports:
+    - name: http
+      port: 8788
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shenmux-controller
+  namespace: shenmux
+spec:
+  tls:
+    - hosts: [shenmux.example.com]
+      secretName: shenmux-controller-tls
+  rules:
+    - host: shenmux.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: shenmux-controller
+                port:
+                  name: http
