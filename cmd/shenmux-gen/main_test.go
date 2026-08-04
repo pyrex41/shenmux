@@ -28,4 +28,8 @@ func TestGenerateEmbedsSemanticSourceAndRejectsMissingFunction(t *testing.T) {
 	if _, _, err := generate([]byte(broken), template); err == nil {
 		t.Fatal("generator accepted a missing semantic function")
 	}
+	broken = strings.Replace(string(spec), "(define mux.reduce\n", "(define mux.reduce-missing\n", 1)
+	if _, _, err := generate([]byte(broken), template); err == nil {
+		t.Fatal("generator accepted a missing reducer")
+	}
 }

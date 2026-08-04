@@ -140,7 +140,7 @@ func TestRuntimeAttachControlInputOutputResizeAndSnapshot(t *testing.T) {
 		}
 	}
 
-	resync, err := runtime.AttachSnapshot(cid)
+	resync, err := runtime.ResyncSnapshot(cid)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -165,7 +165,11 @@ func handleControl(
 		cancel()
 		if err == nil {
 			var attached protocol.Message
-			attached, err = runtime.AttachSnapshot(cid)
+			if msg.Kind == protocol.KindResync {
+				attached, err = runtime.ResyncSnapshot(cid)
+			} else {
+				attached, err = runtime.AttachSnapshot(cid)
+			}
 			if err == nil {
 				attached.Meta.RequestID = requestID
 				response = &attached

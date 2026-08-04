@@ -316,6 +316,20 @@ func (p *Program) evalCall(state *evalState, depth int, expr node, env map[strin
 			return p.eval(state, depth+1, args[1], env)
 		}
 		return p.eval(state, depth+1, args[2], env)
+	case "let":
+		if len(args) != 3 || args[0].kind != nodeAtom || !isVariable(args[0].text) {
+			return nil, errors.New("let expects variable, value, and body")
+		}
+		value, err := p.eval(state, depth+1, args[1], env)
+		if err != nil {
+			return nil, err
+		}
+		bodyEnv := make(map[string]any, len(env)+1)
+		for key, item := range env {
+			bodyEnv[key] = item
+		}
+		bodyEnv[args[0].text] = value
+		return p.eval(state, depth+1, args[2], bodyEnv)
 	case "=", ">", ">=", "<", "<=", "+", "-":
 		return p.evalOperator(state, depth, name, args, env)
 	case "head", "tail":
