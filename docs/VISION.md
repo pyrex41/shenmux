@@ -100,9 +100,12 @@ to “it just works” behind NAT, firewalls, and cloud security groups:
 - the service multiplexes encrypted session frames;
 - no inbound port is required on the user's server.
 
-The relay must not parse terminal contents. Session payloads should be
-end-to-end encrypted between the authorized client and agent, even when the
-service is relaying them.
+The relay must not become the source of terminal truth. V1 uses an explicitly
+labelled trusted-server TLS mode so the first vertical slice can reuse the
+current checkpoint/delta implementation; V2 adds blind end-to-end encrypted
+session payloads between the authorized client and agent. The product must not
+claim blind relay before that V2 mode passes its cryptographic and recovery
+gates.
 
 ### Target architecture: direct encrypted paths with relay fallback
 

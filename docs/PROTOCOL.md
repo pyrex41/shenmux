@@ -14,7 +14,11 @@ ROUTER adds the routing identity as the first transport frame. Published message
 [session/<name>] [kind] [JSON metadata] [optional binary payload]
 ```
 
-Protocol version is currently `1`. Metadata is limited to 64 KiB and payloads to 256 MiB at the decoder boundary.
+The implemented local protocol version is currently `2`. Metadata is limited
+to 64 KiB and payloads to 64 MiB at the decoder boundary. The outbound relay
+wraps these multipart frames byte-for-byte; it does not define a second
+terminal protocol. The relay plan and trust-mode sequencing are in
+[V1/V2 plan](V1-V2-PLAN.md).
 
 ## Metadata
 
@@ -47,7 +51,7 @@ The ROUTER identity, not `client_id`, authorizes a request. When `client_id` is 
 
 | Kind | Sequence-bearing | Payload |
 |---|---:|---|
-| `pty` | yes | raw PTY bytes |
+| `screen-delta` | yes | canonical interpreted screen delta |
 | `resize` | yes | dimensions in metadata |
 | `exit` | yes | exit code in metadata |
 

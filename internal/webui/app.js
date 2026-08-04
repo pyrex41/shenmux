@@ -10,6 +10,8 @@
   const ctx = canvas.getContext("2d");
   const palette = { fg: "#d7e0ea", bg: "#080b10" };
   let socket;
+  let reconnectTimer;
+  let reconnectDelay = 250;
   let state;
   let clientID = "";
   let lastSeq = 0;
@@ -21,7 +23,11 @@
     status.style.color = good ? "#65e6a7" : "#748294";
   };
   const send = (message) => {
-    if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify(message));
+      return true;
+    }
+    return false;
   };
   const acquireButton = document.querySelector("#acquire");
   const releaseButton = document.querySelector("#release");
@@ -178,12 +184,22 @@
 
   const scheme = location.protocol === "https:" ? "wss" : "ws";
   function connect() {
+    if (socket && socket.readyState === WebSocket.OPEN) return;
     socket = new WebSocket(`${scheme}://${location.host}/ws`);
-    socket.onopen = () => { setStatus("connected", true); canvas.focus(); };
+    socket.onopen = () => {
+      reconnectDelay = 250;
+      setStatus("connected · restoring", true);
+      canvas.focus();
+    };
     socket.onmessage = (event) => { try { onMessage(JSON.parse(event.data)); } catch (_) { setStatus("invalid server message"); } };
     socket.onclose = () => {
       setStatus("disconnected · retrying");
-      setTimeout(connect, 1000);
+      if (reconnectTimer) return;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = undefined;
+        connect();
+      }, reconnectDelay);
+      reconnectDelay = Math.min(5000, reconnectDelay * 2);
     };
     socket.onerror = () => setStatus("connection error");
   }

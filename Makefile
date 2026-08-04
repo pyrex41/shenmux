@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 BIN_DIR ?= bin
 
-.PHONY: all build web-build test race vet guards guard-check audit shen bifrost check clean install
+.PHONY: all build web-build test test-relay test-deploy race vet guards guard-check audit shen bifrost check clean install
 
 all: check build
 
@@ -10,12 +10,19 @@ web-build:
 
 build: web-build
 	mkdir -p $(BIN_DIR)
+	go build -o $(BIN_DIR)/shenmux ./cmd/shenmux
 	go build -o $(BIN_DIR)/muxd ./cmd/muxd
 	go build -o $(BIN_DIR)/muxctl ./cmd/muxctl
 	go build -o $(BIN_DIR)/shenmux-web ./cmd/shenmux-web
 
 test:
 	go test ./...
+
+test-relay:
+	go test ./internal/relay ./internal/policy ./internal/appstate ./internal/transport ./internal/update ./cmd/shenmux
+
+test-deploy:
+	CGO_ENABLED=0 go build ./cmd/shenmux ./cmd/muxd ./cmd/muxctl ./cmd/shenmux-web
 
 race:
 	go test -race ./...
@@ -43,6 +50,7 @@ check: web-build guard-check audit shen test vet
 	CGO_ENABLED=0 go build ./...
 
 install: build
+	install -m 0755 $(BIN_DIR)/shenmux $(HOME)/.local/bin/shenmux
 	install -m 0755 $(BIN_DIR)/muxd $(HOME)/.local/bin/muxd
 	install -m 0755 $(BIN_DIR)/muxctl $(HOME)/.local/bin/muxctl
 	install -m 0755 $(BIN_DIR)/shenmux-web $(HOME)/.local/bin/shenmux-web

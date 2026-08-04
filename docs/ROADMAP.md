@@ -1,9 +1,19 @@
 # Roadmap
 
+The product delivery roadmap is defined in [V1/V2 plan](V1-V2-PLAN.md).
+V1 keeps server-owned PTY/session leadership and adds the authenticated
+outbound relay. V2 hardens identity/policy and adds blind relay plus optional
+direct transport. Local-first replication, handoff, and Golem are V3 ideas,
+not current implementation drivers.
+
+## Existing runtime foundations
+
 1. Pin and vendor a reproducible `libghostty-vt` build, then wire terminal effect callbacks that write required responses back through the guarded PTY writer.
 2. Add a native full-terminal checkpoint codec when Ghostty exposes stable export/import, retaining only a bounded post-checkpoint replay log.
 3. Build a graphical client that embeds libghostty, replays historical resizes off-screen, and renders the exact snapshot rather than replaying into the host terminal.
-4. Add CURVE authentication, server policy for allowed client keys, and safe TCP endpoint profiles.
+4. Keep CURVE/TCP authentication as a local-prototype hardening option only;
+   the product path is authenticated outbound WSS relay as specified in
+   [V1/V2 plan](V1-V2-PLAN.md).
 5. Add per-client viewport dimensions and an explicit authoritative-resize policy instead of last-writer-wins.
 6. Add journal persistence, daemon restart recovery, named session discovery, and process supervision.
 7. Keep Shen as the authoritative control-plane reducer: lower typed commands to state-plus-effect results, and keep PTY, terminal, ZeroMQ, clocks, persistence, and effect execution in Go adapters.

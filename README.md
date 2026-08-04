@@ -34,6 +34,40 @@ Attachment uses an XPUB subscription barrier. A client subscribes to both the se
 
 See [Architecture](docs/ARCHITECTURE.md), [Protocol](docs/PROTOCOL.md), and [Trust model](docs/TRUST-MODEL.md).
 
+## V1/V2 binary and relay foundations
+
+The `shenmux` binary is the current binary-first entry point. `shenmux login
+--controller URL --code CODE` enrolls an Ed25519 device, `shenmux agent`
+maintains the authenticated outbound tunnel, and `shenmux controller` starts
+the development/self-hosted relay endpoint. The relay preserves protocol v2
+frames and reconnects with bounded backoff.
+
+Agents can use a Tailscale/WireGuard peer when the hosts share a tailnet:
+
+```sh
+shenmux agent --controller https://relay.example --transport auto \
+  --direct tailscale://100.64.0.2:8788/ws
+```
+
+`auto` probes the encrypted tailnet endpoint first and falls back to the
+authenticated outbound relay after a bounded failure. Use `--transport relay`
+to force relay-only operation, or `--transport tailscale` to require the peer
+path. Instead of an explicit endpoint, pass `--tailscale-peer NAME` (and
+optionally `--tailscale-port`) to discover an online peer via the local
+`tailscale` CLI. The same values may be persisted as `transport`,
+`direct_endpoint`, and `tailscale_peer` in
+the XDG config file (or supplied with `SHENMUX_TRANSPORT` and
+`SHENMUX_DIRECT_ENDPOINT`). No inbound public port is needed for relay mode;
+tailnet mode requires the local Tailscale/WireGuard service and a peer address.
+
+V2 relay primitives are implemented in `internal/relay`: blind per-stream
+X25519/Ed25519 key confirmation, AES-GCM payload protection, replay and
+downgrade checks, and authenticated key rotation. `internal/policy` provides
+durable ACL/capability/control-lease/revocation/audit metadata, while
+`internal/transport` selects a healthy direct path with relay fallback and
+`internal/update` verifies signed update manifests. These are transport and
+policy foundations; local-first leadership and PTY handoff remain future work.
+
 ## Build
 
 Requirements:

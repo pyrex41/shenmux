@@ -35,10 +35,19 @@ The mux-specific emitter is intentionally narrower than generic `shengen`. It ch
 - The libzmq 4.x ABI represents `zmq_msg_t` as the documented 64-byte opaque value.
 - The pinned libghostty-vt headers match the linked library when the build tag is enabled.
 
+## Current prototype limitations
+
+The current muxd/WebSocket prototype still has no remote authentication or
+authorization policy and no encrypted transport configuration. Owner-only
+local IPC containment is not a substitute for cryptographic identity. These
+are intentional prototype limitations, not the V1 product contract; the
+replacement contract and sequencing are in [V1/V2 plan](V1-V2-PLAN.md).
+
 ## Not claimed
 
-- No remote authentication or authorization policy; owner-only local IPC containment is not a substitute for cryptographic identity.
-- No encrypted transport configuration.
+- V1 trusted-server relay does not provide blind end-to-end confidentiality.
+- Blind relay confidentiality is a V2 claim, only after its key exchange,
+  downgrade, replay, and recovery tests pass.
 - No durable delivery guarantee from PUB/SUB.
 - No proof of liveness or bounded memory for an indefinitely running session.
 - No full native terminal snapshot in the current Ghostty C API integration.

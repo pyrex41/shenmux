@@ -13,7 +13,8 @@ if [[ -n "$unexpected" ]]; then
   exit 1
 fi
 
-if grep -R --line-number --include='*.go' 'Session{' --exclude='guards_gen.go' --exclude='guards_test.go' .; then
+if grep -R --line-number --include='*.go' -E '(^|[^[:alnum:]_])shenguard\.Session\{' \
+  --exclude='guards_gen.go' --exclude='guards_test.go' .; then
   echo "FAIL: raw shenguard.Session literal found outside the guard package" >&2
   exit 1
 fi
