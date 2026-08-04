@@ -3,5 +3,6 @@
 .direnv
 bin
 dist
+web
 shenmux-authoritative-state-source.zip
 *.swp

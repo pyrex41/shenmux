@@ -17,6 +17,17 @@ metadata:
   namespace: default
 data:
   pod-spec.yaml: |
+    securityContext:
+      fsGroup: 999
+    initContainers:
+      - name: shenmux-ipc-permissions
+        image: ghcr.io/pyrex41/shenmux:latest
+        command: ["sh", "-c", "chown 999:999 /run/shenmux && chmod 700 /run/shenmux"]
+        securityContext:
+          runAsUser: 0
+        volumeMounts:
+          - name: shenmux-ipc
+            mountPath: /run/shenmux
     containers:
       - name: shenmux-agent
         image: ghcr.io/pyrex41/shenmux:latest
