@@ -29,6 +29,7 @@ import (
 	agentbridge "github.com/pyrex41/shenmux/internal/agent"
 	"github.com/pyrex41/shenmux/internal/appstate"
 	"github.com/pyrex41/shenmux/internal/naming"
+	"github.com/pyrex41/shenmux/internal/policy"
 	"github.com/pyrex41/shenmux/internal/relay"
 	"github.com/pyrex41/shenmux/internal/server"
 	"github.com/pyrex41/shenmux/internal/shenguard"
@@ -690,6 +691,7 @@ func runController(ctx context.Context, args []string, stderr io.Writer) error {
 	listen := flags.String("listen", "127.0.0.1:8788", "HTTPS/WSS controller listen address (HTTP for local development)")
 	origin := flags.String("origin", "http://localhost", "controller origin bound into agent challenge proofs")
 	enrollmentCount := flags.Int("enrollment-count", 1, "number of single-use enrollment codes to print")
+	devBrowserSubject := flags.String("dev-browser-subject", "", "enable local workspace browser subject (development only)")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -701,6 +703,12 @@ func runController(ctx context.Context, args []string, stderr io.Writer) error {
 	}
 	store := relay.NewEnrollmentStore()
 	controller := relay.NewController(store, *origin)
+	controller.DevBrowserSubject = *devBrowserSubject
+	if *devBrowserSubject != "" {
+		if _, err := controller.Policy.AddGrant(*devBrowserSubject, "", "*", []policy.Permission{policy.PermissionObserve, policy.PermissionControl}, nil); err != nil {
+			return err
+		}
+	}
 	httpServer := &http.Server{Addr: *listen, Handler: controller}
 	go func() {
 		<-ctx.Done()

@@ -81,6 +81,12 @@ func (b *Bridge) Serve(ctx context.Context, conn *websocket.Conn) error {
 			b.closeStream(env.Header.StreamID)
 			continue
 		}
+		if env.Header.FrameType == relay.FrameOpen {
+			if err := b.handleMessage(ctx, conn, env, protocol.Message{Kind: protocol.KindAttach, Meta: protocol.Meta{Version: protocol.Version, Session: env.Header.SessionID}}); err != nil {
+				return err
+			}
+			continue
+		}
 		if env.Header.FrameType != relay.FrameSession {
 			continue
 		}

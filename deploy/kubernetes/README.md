@@ -21,6 +21,11 @@ records. Browser clients request a capability for the selected `device_id` and
 `session_id`, then attach through `/browser`. Terminal payloads are still
 carried by the existing relay framing.
 
+For a disposable local cluster, start the controller with
+`--dev-browser-subject local-test`, port-forward its Service, and open
+`http://127.0.0.1:18878/workspace?subject=local-test`. Hosted deployments must
+replace this development subject with real browser authentication.
+
 The example is intentionally a manifest fragment rather than an operator: it
 works with Deployments, Jobs, StatefulSets, and custom orchestrator pods. A
 future operator can automate enrollment-code rotation and revocation without

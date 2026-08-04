@@ -345,7 +345,7 @@ func (s *Store) authorizeLocked(subject, deviceID, session string, permission Pe
 		}
 	}
 	for _, g := range s.state.Grants {
-		if g.Subject != subject || g.Session != session || (g.DeviceID != "" && g.DeviceID != deviceID) || g.RevokedAt != nil || (g.ExpiresAt != nil && !now.Before(*g.ExpiresAt)) {
+		if g.Subject != subject || (g.Session != session && g.Session != "*") || (g.DeviceID != "" && g.DeviceID != deviceID) || g.RevokedAt != nil || (g.ExpiresAt != nil && !now.Before(*g.ExpiresAt)) {
 			continue
 		}
 		if contains(g.Permissions, permission) {

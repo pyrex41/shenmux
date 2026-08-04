@@ -94,6 +94,12 @@ short-lived capability from `/capabilities`, and attach over `/browser`; the
 controller routes session frames to the enrolled agent. `shenmux web` remains
 the local-only gateway for the existing PTY/ZeroMQ path.
 
+For a local development controller, pass `--dev-browser-subject local-test`
+and open `/workspace?subject=local-test`. The workspace lists discovered
+sessions in a sidebar; selecting another pod closes the old stream and opens a
+new capability-bound browser stream. Do not enable this development subject on
+a public controller.
+
 ### Kubernetes agents and orchestrators
 
 Kubernetes workloads can run `shenmux agent` as a sidecar next to a Codex,

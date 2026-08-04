@@ -115,10 +115,14 @@ type Controller struct {
 	CapabilityTTL       time.Duration
 	ControlLeaseTTL     time.Duration
 	AuthenticateBrowser func(*http.Request) (string, error)
-	mu                  sync.Mutex
-	agents              map[string]*controllerAgent
-	streams             map[streamKey]*authorizedStream
-	usedCapabilities    map[string]struct{}
+	// DevBrowserSubject enables the local workspace UI to authenticate a
+	// browser WebSocket, whose API cannot set arbitrary HTTP headers. Keep empty
+	// in hosted deployments and provide real AuthenticateBrowser integration.
+	DevBrowserSubject string
+	mu                sync.Mutex
+	agents            map[string]*controllerAgent
+	streams           map[streamKey]*authorizedStream
+	usedCapabilities  map[string]struct{}
 }
 
 type streamKey struct{ device, session, stream string }
@@ -164,6 +168,30 @@ func (c *Controller) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
+	case "/workspace":
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		data, err := workspaceAssets.ReadFile("workspace.html")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(data)
+	case "/workspace.js":
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		data, err := workspaceAssets.ReadFile("workspace.js")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		_, _ = w.Write(data)
 	case "/enroll":
 		c.handleEnroll(w, r)
 	case "/ws":
@@ -408,6 +436,9 @@ func (c *Controller) browserSubject(r *http.Request) (string, error) {
 		return c.AuthenticateBrowser(r)
 	}
 	subject := r.Header.Get("X-Shenmux-Subject")
+	if subject == "" && c.DevBrowserSubject != "" && r.URL.Query().Get("subject") == c.DevBrowserSubject {
+		subject = c.DevBrowserSubject
+	}
 	if subject == "" {
 		return "", errors.New("browser authentication is required")
 	}
