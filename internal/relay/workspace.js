@@ -9,8 +9,25 @@
   const parse = (data) => { const b = new Uint8Array(data), hl=read32(b,0), h=JSON.parse(new TextDecoder().decode(b.slice(4,4+hl))); return {h,p:b.slice(4+hl)}; };
   const parseInner = (data) => { const b=new Uint8Array(data), dv=new DataView(b.buffer), n=dv.getUint32(0), fs=[];let o=4;for(let i=0;i<n;i++){const l=dv.getUint32(o);o+=4;fs.push(b.slice(o,o+l));o+=l}return {kind:new TextDecoder().decode(fs[0]),meta:JSON.parse(new TextDecoder().decode(fs[1])),payload:fs[2]}; };
   const lowerKeys = (v) => { if(Array.isArray(v)) return v.map(lowerKeys); if(v && typeof v==='object'){ const o={}; for(const [k,x] of Object.entries(v)){ const key=k ? k[0].toLowerCase()+k.slice(1) : k; o[key]=lowerKeys(x); } return o; } return v; };
-  const textState = () => (state?.screen?.frame?.lines || []).map(row => (row||[]).map(c => c?.text || ' ').join('')).join('\n');
-  const render = () => { term.textContent = textState(); term.scrollTop = term.scrollHeight; };
+  const render = () => {
+    const frame = state?.screen?.frame;
+    const lines = frame?.lines || [];
+    const cursor = frame?.cursor || {};
+    term.replaceChildren();
+    lines.forEach((row, y) => {
+      const text = (row || []).map(c => c?.text || ' ').join('');
+      const x = Number(cursor.x ?? cursor.col ?? -1);
+      if (cursor.visible !== false && y === Number(cursor.y ?? cursor.row ?? -2) && x >= 0 && x <= text.length) {
+        term.append(document.createTextNode(text.slice(0, x)));
+        const caret = document.createElement('span');
+        caret.className = 'cursor';
+        caret.textContent = text[x] || ' ';
+        term.append(caret, document.createTextNode(text.slice(x + 1)));
+      } else term.append(document.createTextNode(text));
+      if (y < lines.length - 1) term.append(document.createTextNode('\n'));
+    });
+    term.scrollTop = term.scrollHeight;
+  };
   const apply = async (msg) => {
     if(msg.kind === 'attached'){ const raw = new Response(new Blob([msg.payload]).stream().pipeThrough(new DecompressionStream('gzip'))); const archive=lowerKeys(JSON.parse(await (await raw).text())); state=archive.checkpoint; for(const e of (archive.tail||[])){if(e.kind==='screen-delta') applyDelta(e.delta);state.seq=e.seq} render(); return; }
     if(msg.kind === 'screen-delta'){applyDelta(msg.payload ? lowerKeys(JSON.parse(new TextDecoder().decode(msg.payload))) : null);if(state)state.seq=msg.meta.seq;render();}
