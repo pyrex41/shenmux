@@ -23,7 +23,7 @@
   _ ->
     (let Dim [80 24]
       (let Snap [0 Dim 0 0 false ""]
-        (let S0 [[] 0 Snap Dim false false []]
+        (let S0 [[] 0 Snap Dim false false [[] []]]
           (let Begin (mux.reduce S0 ["begin-attach" "client-1"])
             (let Finish (mux.reduce (head (tail Begin))
                                     ["finish-attach" "client-1" Snap])
@@ -37,7 +37,7 @@
 
 (define mux.base
   {number --> session}
-  _ -> [["client-1"] 0 [0 [80 24] 0 0 false ""] [80 24] false false []])
+  _ -> [["client-1"] 0 [0 [80 24] 0 0 false ""] [80 24] false false [[] []]])
 
 (define mux.after-acquire
   {number --> session}
@@ -71,7 +71,7 @@
   {number --> boolean}
   _ ->
     (let S [["owner" "observer"] 0 [0 [80 24] 0 0 false ""] [80 24]
-            false false ["owner"]]
+            false false [["owner"] []]]
       (and (mux.assert (mux.rejected? (mux.reduce S ["input" "observer" 1])
                                       "control-owned") true "observer rejected")
            (and (mux.assert (mux.rejected? (mux.reduce S ["input" "missing" 1])
@@ -84,7 +84,7 @@
   _ ->
     (let Dim [80 24]
       (let Snap [0 Dim 0 0 false ""]
-        (let S0 [[] 0 Snap Dim false false []]
+        (let S0 [[] 0 Snap Dim false false [[] []]]
           (let Begin (mux.reduce S0 ["begin-attach" "client-1"])
             (let Locked (head (tail Begin))
               (and

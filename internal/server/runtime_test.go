@@ -418,6 +418,21 @@ type trackingPTY struct {
 	failAt   int
 }
 
+func TestRuntimePreservesSignedExitCode(t *testing.T) {
+	runtime, _, pub := newTestRuntime(t)
+	if err := runtime.HandleExit(-1); err != nil {
+		t.Fatal(err)
+	}
+	if got := runtime.Status().ExitCode; got != -1 {
+		t.Fatalf("status exit code = %d", got)
+	}
+	eventually(t, func() bool { return len(pub.Messages()) == 1 })
+	messages := pub.Messages()
+	if len(messages) != 1 || messages[0].Meta.ExitCode != -1 {
+		t.Fatalf("exit publication = %#v", messages)
+	}
+}
+
 func (p *trackingPTY) SetSize(dim shenguard.Dimensions) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()

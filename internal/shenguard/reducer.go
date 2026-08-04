@@ -44,7 +44,7 @@ type Command struct {
 	Token    TokenID
 	Dim      Dimensions
 	Snapshot Snapshot
-	Code     uint64
+	Code     int
 }
 
 type Reason string
@@ -83,7 +83,7 @@ type Effect struct {
 	Seq        SeqNo
 	Dimensions Dimensions
 	EventKind  string
-	Code       uint64
+	Code       int
 }
 
 type Result struct {
@@ -219,11 +219,19 @@ func effectsFromValue(values shenmodel.List) ([]Effect, error) {
 				return nil, fmt.Errorf("publish kind has type %T", form[2])
 			}
 			e.EventKind = kind
-			tok, ok := valueAsUint64(form[3])
-			if !ok {
-				return nil, fmt.Errorf("publish token has type %T", form[3])
+			if kind == "exit" {
+				code, ok := valueAsInt(form[3])
+				if !ok {
+					return nil, fmt.Errorf("publish exit code has type %T", form[3])
+				}
+				e.Code = code
+			} else {
+				tok, ok := valueAsUint64(form[3])
+				if !ok {
+					return nil, fmt.Errorf("publish token has type %T", form[3])
+				}
+				e.Token = TokenID(tok)
 			}
-			e.Token = TokenID(tok)
 		case EffectCaptureSnapshot:
 			if len(form) != 1 {
 				return nil, fmt.Errorf("capture-snapshot effect has %d fields", len(form))
@@ -256,4 +264,16 @@ func NewClientIDString(value any) (ClientID, error) {
 		return ClientID{}, fmt.Errorf("client id has type %T", value)
 	}
 	return NewClientID(text)
+}
+
+func valueAsInt(value any) (int, bool) {
+	switch n := value.(type) {
+	case int:
+		return n, true
+	case uint64:
+		converted := int(n)
+		return converted, converted >= 0 && uint64(converted) == n
+	default:
+		return 0, false
+	}
 }

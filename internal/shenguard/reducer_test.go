@@ -17,6 +17,40 @@ func TestCommandValueUsesOpaqueTokenIDs(t *testing.T) {
 	}
 }
 
+func TestProcessExitPreservesSignedCode(t *testing.T) {
+	got := commandValue(Command{Kind: CommandProcessExit, Code: -1})
+	if len(got) != 2 || got[1] != int(-1) {
+		t.Fatalf("exit command encoding = %#v", got)
+	}
+	effects, err := effectsFromValue(shenmodel.List{
+		shenmodel.List{"publish", uint64(1), "exit", int(-1)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(effects) != 1 || effects[0].Code != -1 {
+		t.Fatalf("exit effect = %#v", effects)
+	}
+}
+
+func TestProcessExitRejectedDuringSnapshot(t *testing.T) {
+	state, err := NewSession(mustDimensions(t, 80, 24))
+	if err != nil {
+		t.Fatal(err)
+	}
+	begin, err := Reduce(state, Command{Kind: CommandBeginSnapshot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := Reduce(begin.State, Command{Kind: CommandProcessExit, Code: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsRejected() || result.Reason != ReasonWriterLocked {
+		t.Fatalf("exit while locked = %#v", result)
+	}
+}
+
 func TestAttachBarrierCommandEncoding(t *testing.T) {
 	cid, err := NewClientID("c1")
 	if err != nil {

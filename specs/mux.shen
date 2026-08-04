@@ -69,7 +69,7 @@
   Dim : dimensions;
   WriterLocked : boolean;
   Exited : boolean;
-  Control : (list client-id);
+  Control : (list (list client-id));
   ==============================================================================
   [Clients LastSeq LastSnap Dim WriterLocked Exited Control] : session;)
 
@@ -80,23 +80,17 @@
   X [_ | Rest] -> (mux.member? X Rest))
 
 (define mux.controller
-  {boolean --> (list client-id) --> (list client-id)}
-  false Control -> Control
-  true [] -> []
-  true [_] -> []
-  true [Owner _] -> [Owner])
+  {boolean --> (list (list client-id)) --> (list client-id)}
+  _ [Owner _] -> Owner)
 
 (define mux.pending
-  {boolean --> (list client-id) --> (list client-id)}
+  {boolean --> (list (list client-id)) --> (list client-id)}
   false _ -> []
-  true [] -> []
-  true [Pending] -> [Pending]
-  true [_ Pending] -> [Pending])
+  true [_ Pending] -> Pending)
 
 (define mux.lock-control
-  {(list client-id) --> client-id --> (list client-id)}
-  [] Pending -> [Pending]
-  [Owner] Pending -> [Owner Pending])
+  {(list (list client-id)) --> client-id --> (list (list client-id))}
+  [Owner _] Pending -> [Owner [Pending]])
 
 (define mux.remove-client
   {client-id --> (list client-id) --> (list client-id)}
@@ -147,13 +141,13 @@
 
 (define mux.begin-snapshot
   {session --> session}
-  [Clients Seq Snap Dim _ Exited Control] ->
-    [Clients Seq Snap Dim true Exited Control])
+  [Clients Seq Snap Dim _ Exited [Owner _]] ->
+    [Clients Seq Snap Dim true Exited [Owner []]])
 
 (define mux.end-snapshot
   {session --> snapshot --> session}
-  [Clients Seq _ Dim _ Exited Control] NewSnap ->
-    [Clients Seq NewSnap Dim false Exited Control])
+  [Clients Seq _ Dim _ Exited [Owner _]] NewSnap ->
+    [Clients Seq NewSnap Dim false Exited [Owner []]])
 
 (define mux.attach
   {session --> client-id --> session}
@@ -164,17 +158,17 @@
   {session --> client-id --> session}
   [Clients Seq Snap Dim Locked Exited Control] C ->
     [(mux.remove-client C Clients)
-     Seq Snap Dim Locked Exited (mux.release-if-owner C (mux.controller Locked Control))])
+     Seq Snap Dim Locked Exited [(mux.release-if-owner C (mux.controller Locked Control)) []]])
 
 (define mux.acquire-control
   {session --> client-id --> session}
   [Clients Seq Snap Dim Locked Exited Control] C ->
-    [Clients Seq Snap Dim Locked Exited [C]])
+    [Clients Seq Snap Dim Locked Exited [[C] []]])
 
 (define mux.release-control
   {session --> client-id --> session}
   [Clients Seq Snap Dim Locked Exited Control] C ->
-    [Clients Seq Snap Dim Locked Exited (mux.release-if-owner C (mux.controller Locked Control))])
+    [Clients Seq Snap Dim Locked Exited [(mux.release-if-owner C (mux.controller Locked Control)) []]])
 
 (define mux.next-seq
   {seq-no --> seq-no}
@@ -292,7 +286,7 @@
             (if (not (mux.snapshot-matches? [Clients Seq OldSnap Dim Locked Exited Control] NewSnap))
                 (mux.rejected "snapshot-mismatch")
                 (mux.accepted [(if (mux.member? C Clients) Clients [C | Clients])
-                               Seq NewSnap Dim false Exited (mux.controller Locked Control)]
+                               Seq NewSnap Dim false Exited [(mux.controller Locked Control) []]]
                               [["reply" C 0]])))))
 
 (define mux.reduce-attach
@@ -397,11 +391,13 @@
 (define mux.reduce-process-exit
   {session --> number --> (list A)}
   S Code ->
-    (if (head (tail (tail (tail (tail (tail S))))))
-        (mux.rejected "exited")
-        (let Seq (mux.next-seq (head (tail S)))
-          (mux.accepted (mux.apply-exit S Seq)
-                        [["publish" Seq "exit" Code]]))))
+    (if (head (tail (tail (tail (tail S)))))
+        (mux.rejected "writer-locked")
+        (if (head (tail (tail (tail (tail (tail S))))))
+            (mux.rejected "exited")
+            (let Seq (mux.next-seq (head (tail S)))
+              (mux.accepted (mux.apply-exit S Seq)
+                            [["publish" Seq "exit" Code]])))))
 
 (define mux.reduce-lease-expired
   {session --> client-id --> (list A)}

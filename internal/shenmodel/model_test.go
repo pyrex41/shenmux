@@ -49,8 +49,8 @@ func TestMuxSemanticMutationChangesExecutableBehavior(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Session fields: clients, seq, snapshot, dimensions, lock, exited, and
-	// flat control state (unlocked: zero-or-one controller).
-	session := List{List{"client-a"}, uint64(0), "opaque-snapshot", List{uint64(80), uint64(24)}, false, false, List{"client-a"}}
+	// nested control state: controller and pending attach are independent lists.
+	session := List{List{"client-a"}, uint64(0), "opaque-snapshot", List{uint64(80), uint64(24)}, false, false, List{List{"client-a"}, List{}}}
 	got, err := original.Call("mux.accept-input?", session, "client-a")
 	if err != nil {
 		t.Fatal(err)

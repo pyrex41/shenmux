@@ -591,18 +591,18 @@ func (r *Runtime) HandleExit(exitCode int) error {
 		return nil
 	}
 	if r.model.Exited() {
-		_, err := r.reduceLocked(shenguard.Command{Kind: shenguard.CommandProcessExit, Code: uint64(exitCode)})
+		_, err := r.reduceLocked(shenguard.Command{Kind: shenguard.CommandProcessExit, Code: exitCode})
 		if errors.Is(err, shenguard.ErrExited) {
 			return nil
 		}
 		return err
 	}
-	result, err := r.reduceLocked(shenguard.Command{Kind: shenguard.CommandProcessExit, Code: uint64(exitCode)})
+	result, err := r.reduceLocked(shenguard.Command{Kind: shenguard.CommandProcessExit, Code: exitCode})
 	if err != nil {
 		return err
 	}
 	pub, err := expectEffect(result.Effects, shenguard.EffectPublish)
-	if err != nil || pub.EventKind != "exit" {
+	if err != nil || pub.EventKind != "exit" || pub.Code != exitCode {
 		if err == nil {
 			err = errors.New("Shen reducer returned invalid exit publication")
 		}

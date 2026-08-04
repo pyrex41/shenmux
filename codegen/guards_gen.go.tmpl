@@ -349,10 +349,11 @@ func sessionValue(s Session) shenmodel.List {
 	if !s.controller.IsZero() {
 		controller = shenmodel.List{s.controller.String()}
 	}
-	control := append(shenmodel.List(nil), controller...)
+	pending := shenmodel.List{}
 	if s.writerLocked && !s.pendingAttach.IsZero() {
-		control = append(control, s.pendingAttach.String())
+		pending = shenmodel.List{s.pendingAttach.String()}
 	}
+	control := shenmodel.List{controller, pending}
 	return shenmodel.List{
 		clientListValue(s.clients), s.lastSeq.n, snapshotValue(s.lastSnap), dimensionValue(s.dim),
 		s.writerLocked, s.exited, control,
@@ -428,33 +429,30 @@ func sessionFromValue(value any) (Session, error) {
 		return Session{}, fmt.Errorf("Shen session exited flag has type %T", list[5])
 	}
 	control, ok := list[6].(shenmodel.List)
-	if !ok || len(control) > 2 {
+	if !ok || len(control) != 2 {
 		return Session{}, errors.New("Shen session control has invalid shape")
 	}
 	var controller ClientID
 	var pending ClientID
-	controllerCount := len(control)
-	if locked && len(control) > 0 {
-		controllerCount--
-		text, ok := control[len(control)-1].(string)
+	controllerValues, ok := control[0].(shenmodel.List)
+	if !ok || len(controllerValues) > 1 { return Session{}, errors.New("Shen controller has invalid shape") }
+	pendingValues, ok := control[1].(shenmodel.List)
+	if !ok || len(pendingValues) > 1 { return Session{}, errors.New("Shen pending attach has invalid shape") }
+	if len(controllerValues) == 1 {
+		text, ok := controllerValues[0].(string)
 		if !ok {
-			return Session{}, fmt.Errorf("Shen pending attach has type %T", control[len(control)-1])
-		}
-		pending, err = NewClientID(text)
-		if err != nil {
-			return Session{}, err
-		}
-	}
-	if controllerCount == 1 {
-		text, ok := control[0].(string)
-		if !ok {
-			return Session{}, fmt.Errorf("Shen controller has type %T", control[0])
+			return Session{}, fmt.Errorf("Shen controller has type %T", controllerValues[0])
 		}
 		controller, err = NewClientID(text)
 		if err != nil { return Session{}, err }
 		if _, attached := seen[text]; !attached { return Session{}, fmt.Errorf("Shen controller %q is not attached", text) }
-	} else if controllerCount != 0 {
-		return Session{}, errors.New("Shen session has more than one controller")
+	}
+	if len(pendingValues) == 1 {
+		if !locked { return Session{}, errors.New("Shen pending attach exists while writer is unlocked") }
+		text, ok := pendingValues[0].(string)
+		if !ok { return Session{}, fmt.Errorf("Shen pending attach has type %T", pendingValues[0]) }
+		pending, err = NewClientID(text)
+		if err != nil { return Session{}, err }
 	}
 	return Session{clients: clients, lastSeq: SeqNo{n: seq}, lastSnap: snapshot, dim: dim, writerLocked: locked, exited: exited, controller: controller, pendingAttach: pending}, nil
 }
