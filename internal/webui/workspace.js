@@ -446,7 +446,7 @@ if (typeof document !== "undefined") {
       saveFileButton.disabled = true;
       await refreshFiles();
     }
-    print(`ready · ${runtimeLabel} · Tab completes · ↑↓ history · Ctrl-L clears`);
+    print(`ready · ${runtimeLabel} · ↑↓ history · Ctrl-L clears`);
     const estimate = await navigator.storage.estimate();
     const used = estimate.usage ? `${(estimate.usage / 1024 / 1024).toFixed(1)} MB` : "local";
     storageStatus.textContent = `${runtimeLabel} · ${used}`;

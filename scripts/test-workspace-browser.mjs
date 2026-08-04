@@ -28,8 +28,9 @@ const command = (method, params = {}) => new Promise((resolve) => {
   socket.send(JSON.stringify({ id, method, params }));
 });
 await new Promise((resolve) => { socket.addEventListener("open", resolve, { once: true }); });
-await command("Page.navigate", { url: pageURL });
-await new Promise((resolve) => setTimeout(resolve, 1000));
+const navigationURL = new URL(pageURL);
+navigationURL.searchParams.set("smoke", Date.now().toString());
+await command("Page.navigate", { url: navigationURL.href });
 
 const evaluate = async (expression) => {
   const result = await command("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
@@ -38,8 +39,19 @@ const evaluate = async (expression) => {
 };
 const submit = (text, expected) => `(async()=>{const input=document.querySelector("#command-input"); input.value=${JSON.stringify(text)}; input.form.requestSubmit(); const deadline=Date.now()+5000; while(Date.now()<deadline){const output=document.querySelector("#command-output").innerText; if(output.includes(${JSON.stringify(expected)})) return output; await new Promise(r=>setTimeout(r,50));} return document.querySelector("#command-output").innerText})()`;
 
-const ready = await evaluate(`!document.querySelector("#command-input").disabled`);
+let ready = false;
+const readyDeadline = Date.now() + 5000;
+while (!ready && Date.now() < readyDeadline) {
+  ready = await evaluate(`location.href === ${JSON.stringify(navigationURL.href)} && document.querySelector("#command-input")?.disabled === false`);
+  if (!ready) await new Promise((resolve) => setTimeout(resolve, 50));
+}
 assert.equal(ready, true, "workspace command input did not become ready");
+const commandRowAligned = await evaluate(`(() => {
+  const input = document.querySelector("#command-input").getBoundingClientRect();
+  const hint = document.querySelector(".command-hint").getBoundingClientRect();
+  return Math.abs((input.top + input.height / 2) - (hint.top + hint.height / 2)) < 1;
+})()`);
+assert.equal(commandRowAligned, true, "Tab completion hint is not aligned with the command input");
 const marker = `browser-${Date.now()}`;
 const writeOutput = await evaluate(submit(`write notes/browser-test.txt ${marker}`, "saved notes/browser-test.txt"));
 assert.match(writeOutput, new RegExp(`saved notes/browser-test\\.txt`));
