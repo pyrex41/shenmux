@@ -45,6 +45,7 @@ var requiredFunctions = map[string]int{
 	"mux.apply-resize":         3,
 	"mux.apply-control":        2,
 	"mux.apply-exit":           2,
+	"mux.reduce":               2,
 }
 
 func main() {

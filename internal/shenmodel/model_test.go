@@ -23,6 +23,20 @@ func TestPatternMatchingAndRecursion(t *testing.T) {
 	}
 }
 
+func TestLetBindsLexicalVariable(t *testing.T) {
+	program := MustParse(`
+(define choose
+  X -> (let Y (+ X 1) (= Y 2)))
+`)
+	value, err := program.Call("choose", uint64(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != true {
+		t.Fatalf("choose = %#v", value)
+	}
+}
+
 func TestMuxSemanticMutationChangesExecutableBehavior(t *testing.T) {
 	specPath := filepath.Join("..", "..", "specs", "mux.shen")
 	sourceBytes, err := os.ReadFile(specPath)
@@ -34,9 +48,9 @@ func TestMuxSemanticMutationChangesExecutableBehavior(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Session fields: clients, seq, snapshot, dimensions, lock, exited,
-	// controller. The controller is represented as zero-or-one client list.
-	session := List{List{"client-a"}, uint64(0), "opaque-snapshot", List{uint64(80), uint64(24)}, false, false, List{"client-a"}}
+	// Session fields: clients, seq, snapshot, dimensions, lock, exited, and
+	// nested control state: controller and pending attach are independent lists.
+	session := List{List{"client-a"}, uint64(0), "opaque-snapshot", List{uint64(80), uint64(24)}, false, false, List{List{"client-a"}, List{}}}
 	got, err := original.Call("mux.accept-input?", session, "client-a")
 	if err != nil {
 		t.Fatal(err)
@@ -47,11 +61,11 @@ func TestMuxSemanticMutationChangesExecutableBehavior(t *testing.T) {
 
 	needle := `(define mux.accept-input?
   {session --> client-id --> boolean}
-  [Clients _ _ _ Locked Exited Controller] C ->
+  [Clients _ _ _ Locked Exited Control] C ->
     (and (not Locked)
          (and (not Exited)
               (and (mux.member? C Clients)
-                   (= Controller [C])))))`
+                   (= (mux.controller Locked Control) [C])))))`
 	replacement := `(define mux.accept-input?
   {session --> client-id --> boolean}
   _ _ -> false)`

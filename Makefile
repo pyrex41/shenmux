@@ -38,7 +38,7 @@ shen:
 bifrost:
 	./scripts/run-bifrost.sh
 
-check: web-build guard-check audit test vet
+check: web-build guard-check audit shen test vet
 	go build ./...
 	CGO_ENABLED=0 go build ./...
 

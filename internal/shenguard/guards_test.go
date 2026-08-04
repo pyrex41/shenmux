@@ -143,3 +143,29 @@ func TestExclusiveControlOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestLegacySnapshotPreservesControlOwner(t *testing.T) {
+	s, err := NewSession(mustDim(t, 80, 24))
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := mustCID(t, "owner")
+	s, err = Attach(s, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err = AcquireControl(s, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err = BeginSnapshot(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := s.ControlOwner(); !ok || got != owner {
+		t.Fatalf("control owner while locked = %v, %v", got, ok)
+	}
+	if _, ok := s.PendingAttach(); ok {
+		t.Fatal("legacy snapshot unexpectedly gained a pending attach")
+	}
+}

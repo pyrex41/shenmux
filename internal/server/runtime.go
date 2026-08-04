@@ -125,20 +125,100 @@ func (r *Runtime) WriterErrors() <-chan error    { return r.writer.Errors() }
 func (r *Runtime) PublisherErrors() <-chan error { return r.events.Errors() }
 func (r *Runtime) FatalErrors() <-chan error     { return r.fatal }
 
+func reduceError(reason shenguard.Reason) error {
+	switch reason {
+	case shenguard.ReasonAlreadyAttached:
+		return shenguard.ErrAlreadyAttached
+	case shenguard.ReasonNotAttached:
+		return shenguard.ErrNotAttached
+	case shenguard.ReasonWriterLocked:
+		return shenguard.ErrWriterLocked
+	case shenguard.ReasonWriterUnlocked:
+		return shenguard.ErrWriterUnlocked
+	case shenguard.ReasonSequence:
+		return shenguard.ErrSequence
+	case shenguard.ReasonExited:
+		return shenguard.ErrExited
+	case shenguard.ReasonNoControl:
+		return shenguard.ErrNoControl
+	case shenguard.ReasonControlOwned:
+		return shenguard.ErrControlOwned
+	case shenguard.ReasonSnapshotMismatch:
+		return shenguard.ErrSnapshotMismatch
+	case shenguard.ReasonSnapshotOwnerMismatch:
+		return shenguard.ErrSnapshotOwnerMismatch
+	case shenguard.ReasonInvalidDimensions:
+		return shenguard.ErrInvalidDimensions
+	case shenguard.ReasonUnknownCommand:
+		return shenguard.ErrUnknownCommand
+	default:
+		return fmt.Errorf("Shen reducer rejected command: %s", reason)
+	}
+}
+
+func (r *Runtime) reduceLocked(command shenguard.Command) (shenguard.Result, error) {
+	result, err := shenguard.Reduce(r.model, command)
+	if err != nil {
+		return shenguard.Result{}, err
+	}
+	if !result.Accepted {
+		return shenguard.Result{}, reduceError(result.Reason)
+	}
+	return result, nil
+}
+
+func expectEffect(effects []shenguard.Effect, kind shenguard.EffectKind) (shenguard.Effect, error) {
+	for _, effect := range effects {
+		if effect.Kind == kind {
+			return effect, nil
+		}
+	}
+	return shenguard.Effect{}, fmt.Errorf("Shen reducer omitted %q effect", kind)
+}
+
 // AttachSnapshot freezes a canonical checkpoint-plus-tail archive at one
 // sequence boundary. Compression occurs outside the runtime lock; publications
 // with higher sequence numbers queue on the already-ready SUB socket.
 func (r *Runtime) AttachSnapshot(cid shenguard.ClientID) (protocol.Message, error) {
+	return r.snapshot(cid, false)
+}
+
+// ResyncSnapshot requires existing membership through the explicit Shen
+// resync command before running the shared snapshot barrier.
+func (r *Runtime) ResyncSnapshot(cid shenguard.ClientID) (protocol.Message, error) {
+	return r.snapshot(cid, true)
+}
+
+func (r *Runtime) snapshot(cid shenguard.ClientID, requireAttached bool) (protocol.Message, error) {
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
 		return protocol.Message{}, errors.New("runtime is closed")
 	}
-	locked, err := shenguard.BeginSnapshot(r.model)
+	if requireAttached {
+		resync, err := r.reduceLocked(shenguard.Command{Kind: shenguard.CommandResync, Client: cid})
+		if err != nil {
+			r.mu.Unlock()
+			return protocol.Message{}, err
+		}
+		if len(resync.Effects) != 0 {
+			r.mu.Unlock()
+			return protocol.Message{}, errors.New("Shen reducer returned effects for resync authorization")
+		}
+		r.model = resync.State
+	}
+	// The same Shen-owned barrier handles both first attachment and resync.
+	// FinishAttach retains an existing member or adds a new one atomically.
+	begin, err := r.reduceLocked(shenguard.Command{Kind: shenguard.CommandBeginAttach, Client: cid})
 	if err != nil {
 		r.mu.Unlock()
 		return protocol.Message{}, err
 	}
+	if _, err := expectEffect(begin.Effects, shenguard.EffectCaptureSnapshot); err != nil {
+		r.mu.Unlock()
+		return protocol.Message{}, err
+	}
+	locked := begin.State
 	archive := r.store.Snapshot()
 	if archive.LastSeq() != locked.LastSeq().Uint64() {
 		r.mu.Unlock()
@@ -153,7 +233,22 @@ func (r *Runtime) AttachSnapshot(cid shenguard.ClientID) (protocol.Message, erro
 		locked.LastSeq(), locked.Dim(), int(cursor.X), int(cursor.Y), stateAtBoundary.Frame.AltScreen, nil,
 	)
 	if err == nil {
-		r.model, err = shenguard.EndSnapshot(locked, snapshot)
+		finish, finishErr := shenguard.Reduce(locked, shenguard.Command{Kind: shenguard.CommandFinishAttach, Client: cid, Snapshot: snapshot})
+		if finishErr == nil && !finish.Accepted {
+			finishErr = reduceError(finish.Reason)
+		}
+		err = finishErr
+		if err == nil {
+			reply, effectErr := expectEffect(finish.Effects, shenguard.EffectReply)
+			if effectErr != nil || reply.Client != cid || reply.Token != 0 {
+				if effectErr == nil {
+					effectErr = errors.New("Shen reducer returned invalid attach reply effect")
+				}
+				err = effectErr
+			} else {
+				r.model = finish.State
+			}
+		}
 	}
 	r.mu.Unlock()
 	if err != nil {
@@ -178,19 +273,16 @@ func (r *Runtime) AttachSnapshot(cid shenguard.ClientID) (protocol.Message, erro
 	}
 	payload, err := protocol.EncodeArchive(archive)
 	if err != nil {
-		return protocol.Message{}, err
+		return protocol.Message{}, r.fail(fmt.Errorf("encode attach archive: %w", err))
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
-		return protocol.Message{}, errors.New("runtime closed while encoding attach snapshot")
+		return protocol.Message{}, r.failLocked(errors.New("runtime closed while encoding attach snapshot"))
 	}
 	if !shenguard.IsAttached(r.model, cid) {
-		r.model, err = shenguard.Attach(r.model, cid)
-	}
-	if err != nil {
-		return protocol.Message{}, err
+		return protocol.Message{}, errors.New("client detached while encoding attach snapshot")
 	}
 	r.lastSeen[cid] = time.Now()
 
@@ -227,11 +319,29 @@ func (r *Runtime) Input(cid shenguard.ClientID, payload []byte) error {
 	if r.closed {
 		return errors.New("runtime is closed")
 	}
-	if !shenguard.AcceptInput(r.model, cid) {
-		return inputRejection(r.model, cid)
+	result, err := r.reduceLocked(shenguard.Command{Kind: shenguard.CommandInput, Client: cid, Token: shenguard.TokenID(1)})
+	if err != nil {
+		// Preserve the historical input error contract: a non-owner observer
+		// receives ErrNoControl even though Shen distinguishes control-owned
+		// from no-control rejection reasons for other commands.
+		if errors.Is(err, shenguard.ErrControlOwned) {
+			return shenguard.ErrNoControl
+		}
+		return err
+	}
+	effect, err := expectEffect(result.Effects, shenguard.EffectWritePTY)
+	if err != nil || effect.Token != shenguard.TokenID(1) || effect.Client != cid {
+		if err == nil {
+			err = errors.New("Shen reducer returned invalid input effect")
+		}
+		return err
 	}
 	r.lastSeen[cid] = time.Now()
-	return r.writer.Enqueue(payload)
+	if err := r.writer.Enqueue(payload); err != nil {
+		return err
+	}
+	r.model = result.State
+	return nil
 }
 
 func (r *Runtime) Resize(cid shenguard.ClientID, dim shenguard.Dimensions) error {
@@ -240,26 +350,36 @@ func (r *Runtime) Resize(cid shenguard.ClientID, dim shenguard.Dimensions) error
 	if r.closed {
 		return errors.New("runtime is closed")
 	}
-	if !shenguard.AcceptResize(r.model, cid) {
-		return inputRejection(r.model, cid)
+	result, err := r.reduceLocked(shenguard.Command{Kind: shenguard.CommandResize, Client: cid, Dim: dim})
+	if err != nil {
+		return err
 	}
 	r.lastSeen[cid] = time.Now()
 	oldDim := r.model.Dim()
-	if dim == oldDim {
+	if len(result.Effects) == 0 {
+		r.model = result.State
 		return nil
 	}
+	resizeEffect, err := expectEffect(result.Effects, shenguard.EffectResizePTY)
+	if err != nil || resizeEffect.Dimensions != dim {
+		if err == nil {
+			err = errors.New("Shen reducer returned invalid resize effect")
+		}
+		return err
+	}
+	publishEffect, err := expectEffect(result.Effects, shenguard.EffectPublish)
+	if err != nil || publishEffect.EventKind != "delta" || publishEffect.Seq != result.State.LastSeq() {
+		if err == nil {
+			err = errors.New("Shen reducer returned invalid resize publication")
+		}
+		return err
+	}
+	seq := publishEffect.Seq
+	nextModel := result.State
 
 	// Prove the pure transition first. Then change the PTY while this mutex
 	// prevents any resulting output from being interpreted, resize the single
 	// authoritative emulator, and finally commit the derived canonical delta.
-	seq, err := shenguard.NextSeq(r.model.LastSeq())
-	if err != nil {
-		return err
-	}
-	nextModel, err := shenguard.ApplyResize(r.model, seq, dim)
-	if err != nil {
-		return err
-	}
 	if err := r.pty.SetSize(dim); err != nil {
 		return fmt.Errorf("resize PTY: %w", err)
 	}
@@ -307,8 +427,15 @@ func (r *Runtime) HandlePTYOutput(payload []byte) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.closed || r.model.Exited() {
+	if r.closed {
 		return nil
+	}
+	if r.model.Exited() {
+		_, err := r.reduceLocked(shenguard.Command{Kind: shenguard.CommandPTYOutput, Token: shenguard.TokenID(1)})
+		if errors.Is(err, shenguard.ErrExited) {
+			return nil
+		}
+		return err
 	}
 	effects, err := r.term.Feed(payload)
 	if err != nil {
@@ -330,14 +457,19 @@ func (r *Runtime) HandlePTYOutput(payload []byte) error {
 	if screen.EqualState(nextState, r.state) {
 		return nil
 	}
-	seq, err := shenguard.NextSeq(r.model.LastSeq())
+	result, err := r.reduceLocked(shenguard.Command{Kind: shenguard.CommandPTYOutput, Token: shenguard.TokenID(1)})
 	if err != nil {
 		return err
 	}
-	nextModel, err := shenguard.ApplyDelta(r.model, seq)
-	if err != nil {
+	publishEffect, err := expectEffect(result.Effects, shenguard.EffectPublish)
+	if err != nil || publishEffect.EventKind != "delta" || publishEffect.Token != shenguard.TokenID(1) || publishEffect.Seq != result.State.LastSeq() {
+		if err == nil {
+			err = errors.New("Shen reducer returned invalid PTY publication")
+		}
 		return err
 	}
+	seq := publishEffect.Seq
+	nextModel := result.State
 	msg, err := r.deltaMessageFor(nextModel, seq, delta)
 	if err != nil {
 		return err
@@ -357,18 +489,23 @@ func (r *Runtime) AcquireControl(cid shenguard.ClientID) error {
 	if r.closed {
 		return errors.New("runtime is closed")
 	}
-	if shenguard.HasControl(r.model, cid) {
+	result, err := r.reduceLocked(shenguard.Command{Kind: shenguard.CommandAcquireControl, Client: cid})
+	if err != nil {
+		return err
+	}
+	if len(result.Effects) == 0 {
+		r.model = result.State
 		r.lastSeen[cid] = time.Now()
 		return nil
 	}
-	nextModel, err := shenguard.AcquireControl(r.model, cid)
+	if _, err := expectEffect(result.Effects, shenguard.EffectPublish); err != nil {
+		return err
+	}
+	msg, err := r.controlMessageFromResultLocked(result)
 	if err != nil {
 		return err
 	}
-	msg, err := r.commitControlLocked(nextModel, cid.String())
-	if err != nil {
-		return err
-	}
+	r.model = result.State
 	r.lastSeen[cid] = time.Now()
 	return r.enqueueCommittedLocked(msg)
 }
@@ -379,14 +516,15 @@ func (r *Runtime) ReleaseControl(cid shenguard.ClientID) error {
 	if r.closed {
 		return errors.New("runtime is closed")
 	}
-	nextModel, err := shenguard.ReleaseControl(r.model, cid)
+	result, err := r.reduceLocked(shenguard.Command{Kind: shenguard.CommandReleaseControl, Client: cid})
 	if err != nil {
 		return err
 	}
-	msg, err := r.commitControlLocked(nextModel, "")
+	msg, err := r.controlMessageFromResultLocked(result)
 	if err != nil {
 		return err
 	}
+	r.model = result.State
 	return r.enqueueCommittedLocked(msg)
 }
 
@@ -397,20 +535,21 @@ func (r *Runtime) Detach(cid shenguard.ClientID) error {
 		return errors.New("runtime is closed")
 	}
 	oldOwner := ownerString(r.model)
-	nextModel, err := shenguard.Detach(r.model, cid)
+	result, err := r.reduceLocked(shenguard.Command{Kind: shenguard.CommandDetach, Client: cid})
 	if err != nil {
 		return err
 	}
 	delete(r.lastSeen, cid)
-	newOwner := ownerString(nextModel)
+	newOwner := ownerString(result.State)
 	if oldOwner == newOwner {
-		r.model = nextModel
+		r.model = result.State
 		return nil
 	}
-	msg, err := r.commitControlLocked(nextModel, newOwner)
+	msg, err := r.controlMessageFromResultLocked(result)
 	if err != nil {
 		return err
 	}
+	r.model = result.State
 	return r.enqueueCommittedLocked(msg)
 }
 
@@ -430,31 +569,47 @@ func (r *Runtime) ReapExpired(now time.Time) error {
 	if !last.IsZero() && now.Sub(last) <= r.controlLease {
 		return nil
 	}
-	nextModel, err := shenguard.ReleaseControl(r.model, owner)
+	result, err := r.reduceLocked(shenguard.Command{Kind: shenguard.CommandLeaseExpired, Client: owner})
 	if err != nil {
 		return err
 	}
-	msg, err := r.commitControlLocked(nextModel, "")
+	if len(result.Effects) == 0 {
+		return nil
+	}
+	msg, err := r.controlMessageFromResultLocked(result)
 	if err != nil {
 		return err
 	}
+	r.model = result.State
 	return r.enqueueCommittedLocked(msg)
 }
 
 func (r *Runtime) HandleExit(exitCode int) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.closed || r.model.Exited() {
+	if r.closed {
 		return nil
 	}
-	seq, err := shenguard.NextSeq(r.model.LastSeq())
+	if r.model.Exited() {
+		_, err := r.reduceLocked(shenguard.Command{Kind: shenguard.CommandProcessExit, Code: exitCode})
+		if errors.Is(err, shenguard.ErrExited) {
+			return nil
+		}
+		return err
+	}
+	result, err := r.reduceLocked(shenguard.Command{Kind: shenguard.CommandProcessExit, Code: exitCode})
 	if err != nil {
 		return err
 	}
-	nextModel, err := shenguard.ApplyExit(r.model, seq)
-	if err != nil {
+	pub, err := expectEffect(result.Effects, shenguard.EffectPublish)
+	if err != nil || pub.EventKind != "exit" || pub.Code != exitCode {
+		if err == nil {
+			err = errors.New("Shen reducer returned invalid exit publication")
+		}
 		return err
 	}
+	seq := pub.Seq
+	nextModel := result.State
 	event := protocol.Event{Kind: protocol.EventExit, Seq: seq.Uint64(), ExitCode: exitCode}
 	checkpoint := checkpointFor(nextModel, r.state, exitCode)
 	if err := r.store.Append(event, checkpoint); err != nil {
@@ -465,22 +620,21 @@ func (r *Runtime) HandleExit(exitCode int) error {
 	return r.enqueueCommittedLocked(msg)
 }
 
-func (r *Runtime) commitControlLocked(nextModel shenguard.Session, owner string) (protocol.Message, error) {
-	seq, err := shenguard.NextSeq(r.model.LastSeq())
-	if err != nil {
+func (r *Runtime) controlMessageFromResultLocked(result shenguard.Result) (protocol.Message, error) {
+	pub, err := expectEffect(result.Effects, shenguard.EffectPublish)
+	if err != nil || pub.EventKind != "control" || pub.Seq != result.State.LastSeq() {
+		if err == nil {
+			err = errors.New("Shen reducer returned invalid control publication")
+		}
 		return protocol.Message{}, err
 	}
-	nextModel, err = shenguard.ApplyControl(nextModel, seq)
-	if err != nil {
-		return protocol.Message{}, err
-	}
-	event := protocol.Event{Kind: protocol.EventControl, Seq: seq.Uint64(), ControlOwner: owner}
-	checkpoint := checkpointFor(nextModel, r.state, r.exitCode)
+	owner := ownerString(result.State)
+	event := protocol.Event{Kind: protocol.EventControl, Seq: pub.Seq.Uint64(), ControlOwner: owner}
+	checkpoint := checkpointFor(result.State, r.state, r.exitCode)
 	if err := r.store.Append(event, checkpoint); err != nil {
 		return protocol.Message{}, err
 	}
-	r.model = nextModel
-	return protocol.Message{Kind: protocol.KindControl, Meta: protocol.Meta{Version: protocol.Version, Session: r.session, Seq: seq.Uint64(), ControlOwner: owner}}, nil
+	return protocol.Message{Kind: protocol.KindControl, Meta: protocol.Meta{Version: protocol.Version, Session: r.session, Seq: pub.Seq.Uint64(), ControlOwner: owner}}, nil
 }
 
 func (r *Runtime) deltaMessageFor(model shenguard.Session, seq shenguard.SeqNo, delta screen.Delta) (protocol.Message, error) {
@@ -547,14 +701,4 @@ func ownerString(model shenguard.Session) string {
 		return ""
 	}
 	return owner.String()
-}
-
-func inputRejection(model shenguard.Session, cid shenguard.ClientID) error {
-	if !shenguard.IsAttached(model, cid) {
-		return shenguard.ErrNotAttached
-	}
-	if model.Exited() {
-		return shenguard.ErrExited
-	}
-	return shenguard.ErrNoControl
 }

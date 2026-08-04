@@ -5,7 +5,8 @@ cd "$(dirname "$0")/.."
 ./scripts/shengen-codegen.sh --check
 
 unexpected="$(find internal/shenguard -maxdepth 1 -type f \
-  ! -name 'guards_gen.go' ! -name 'guards_test.go' -print)"
+  ! -name 'guards_gen.go' ! -name 'guards_test.go' \
+  ! -name 'reducer.go' ! -name 'reducer_test.go' -print)"
 if [[ -n "$unexpected" ]]; then
   echo "FAIL: unexpected files in the trusted shenguard package:" >&2
   echo "$unexpected" >&2
