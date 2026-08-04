@@ -11,8 +11,9 @@ web-build:
 workspace-component-build:
 	cargo build --manifest-path runtime/workspace-component/Cargo.toml --target wasm32-wasip2 --release
 	node web/node_modules/@bytecodealliance/jco/src/jco.js transpile runtime/workspace-component/target/wasm32-wasip2/release/shenmux_workspace_component.wasm --out-dir runtime/workspace-component/generated --name workspace_component
+	cd web && node build-workspace.mjs
 
-workspace-component-test: workspace-component-build web-build
+workspace-component-test: workspace-component-build
 	node scripts/test-workspace-component.mjs
 
 workspace-runtime-test:
@@ -24,7 +25,7 @@ golem-workspace-build:
 	command -v golem >/dev/null || (echo "golem CLI is required for the experimental workspace agent" >&2; exit 1)
 	cd runtime/golem-workspace && golem build --yes
 
-build: workspace-component-build web-build
+build: web-build
 	mkdir -p $(BIN_DIR)
 	go build -o $(BIN_DIR)/shenmux ./cmd/shenmux
 	go build -o $(BIN_DIR)/muxd ./cmd/muxd

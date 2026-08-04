@@ -72,4 +72,6 @@ node scripts/test-workspace-browser.mjs
 ```
 
 The normal Go/web build still produces one `shenmux-web` binary with the
-workspace assets embedded.
+workspace assets embedded. It uses the checked-in generated component so a
+normal `make build` does not require Rust. `make workspace-test` explicitly
+regenerates and rebundles that component before exercising it.

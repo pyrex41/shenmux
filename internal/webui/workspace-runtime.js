@@ -36,6 +36,17 @@ export class RemoteConflictError extends Error {
   constructor(message) { super(message); this.name = "RemoteConflictError"; }
 }
 
+function parseContentRange(value) {
+  const match = String(value || "").match(/^bytes (\d+)-(\d+)\/(\d+)$/);
+  if (!match) return null;
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  const total = Number(match[3]);
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || !Number.isSafeInteger(total)
+      || start < 0 || end < start || total <= end) return null;
+  return { start, end, total };
+}
+
 export class RemoteObjectBackend {
   constructor({ baseURL, capability, fetchImpl = globalThis.fetch.bind(globalThis) }) {
     this.baseURL = String(baseURL || "").replace(/\/$/, "");
@@ -48,7 +59,7 @@ export class RemoteObjectBackend {
 
   async request(path, init = {}) {
     const response = await this.fetch(`${this.baseURL}${path}`, { ...init, headers: this.headers(init.headers) });
-    if (response.ok) return response;
+    if (response.ok || response.status === 304) return response;
     if (response.status === 409) throw new RemoteConflictError("remote workspace version conflict");
     const body = await response.text().catch(() => "");
     throw new Error(`remote workspace ${response.status}: ${body || response.statusText}`);
@@ -60,12 +71,54 @@ export class RemoteObjectBackend {
     return Array.isArray(payload.entries) ? payload.entries : [];
   }
 
-  async read(path, offset = 0, length = MAX_READ) {
+  async read(path, offset = 0, length = MAX_READ, { etag = "" } = {}) {
     const end = Math.max(offset, offset + Math.max(1, length) - 1);
+    const headers = { Range: `bytes=${offset}-${end}` };
+    if (etag) headers["If-None-Match"] = etag;
     const response = await this.request(`/objects?path=${encodeURIComponent(normalizePath(path))}`, {
-      headers: { Range: `bytes=${offset}-${end}` },
+      headers,
     });
-    return { bytes: new Uint8Array(await response.arrayBuffer()), etag: response.headers.get("ETag") || "" };
+    if (response.status === 304) {
+      return { bytes: new Uint8Array(), etag: response.headers.get("ETag") || etag, notModified: true, complete: true };
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const contentRange = parseContentRange(response.headers.get("Content-Range"));
+    if (response.status === 206 && bytes.length && (!contentRange || contentRange.start !== offset)) {
+      throw new Error("remote workspace returned an invalid content range");
+    }
+    return {
+      bytes,
+      etag: response.headers.get("ETag") || "",
+      notModified: false,
+      complete: response.status !== 206 || bytes.length === 0 || contentRange.end + 1 >= contentRange.total,
+      total: contentRange?.total,
+    };
+  }
+
+  async readAll(path, { etag = "" } = {}) {
+    const chunks = [];
+    let offset = 0;
+    let version = "";
+    let total;
+    while (true) {
+      const result = await this.read(path, offset, MAX_READ, { etag: offset === 0 ? etag : "" });
+      if (result.notModified) return result;
+      if (!version) version = result.etag;
+      else if (version && result.etag && version !== result.etag) {
+        throw new RemoteConflictError("remote workspace changed while it was being read");
+      }
+      chunks.push(result.bytes);
+      offset += result.bytes.length;
+      total = result.total ?? total;
+      if (result.complete) break;
+    }
+    const bytes = new Uint8Array(total ?? offset);
+    let cursor = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, cursor);
+      cursor += chunk.length;
+    }
+    return { bytes, etag: version, notModified: false, complete: true, total: total ?? offset };
   }
 
   async write(path, bytes, { etag = "", operationID = "" } = {}) {
@@ -93,7 +146,7 @@ export const bytesToBase64 = (bytes) => {
 export const base64ToBytes = (value) => Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
 
 export class WorkspaceJournal {
-  constructor(local) { this.local = local; this.records = []; }
+  constructor(local) { this.local = local; this.records = []; this.flushing = null; }
 
   async load() {
     try { this.records = JSON.parse(await this.local.read("/.shenmux-write-journal.json")); }
@@ -109,20 +162,59 @@ export class WorkspaceJournal {
   }
 
   async flush(remote) {
-    if (!remote || !this.records.length) return { pending: this.records.length, conflict: false };
-    const remaining = [];
+    if (!remote) return { pending: this.records.length, conflict: false, etags: {} };
+    if (this.flushing) return this.flushing;
+    if (!this.records.length) return { pending: 0, conflict: false, etags: {} };
+    this.flushing = this.drain(remote).finally(() => { this.flushing = null; });
+    return this.flushing;
+  }
+
+  async drain(remote) {
+    const etags = {};
     let conflict = false;
-    for (const record of this.records) {
+    while (this.records.length) {
+      const result = await this.flushRecords(remote);
+      Object.assign(etags, result.etags);
+      conflict ||= result.conflict;
+      if (result.failures || !result.completed) break;
+    }
+    return { pending: this.records.length, conflict, etags };
+  }
+
+  async flushRecords(remote) {
+    const records = [...this.records];
+    const completed = new Set();
+    const failedPaths = new Set();
+    const etags = new Map();
+    let conflict = false;
+    let failures = 0;
+    for (const record of records) {
+      if (failedPaths.has(record.path)) {
+        continue;
+      }
       try {
-        if (record.op === "mkdir") await remote.mkdir(record.path, record.id);
-        else await remote.write(record.path, base64ToBytes(record.data), { etag: record.etag, operationID: record.id });
+        if (record.op === "mkdir") {
+          await remote.mkdir(record.path, record.id);
+        } else {
+          const nextETag = await remote.write(record.path, base64ToBytes(record.data), {
+            etag: etags.get(record.path) || record.etag,
+            operationID: record.id,
+          });
+          if (nextETag) etags.set(record.path, nextETag);
+        }
+        completed.add(record.id);
       } catch (error) {
-        remaining.push(record);
+        failedPaths.add(record.path);
+        failures++;
         conflict ||= error instanceof RemoteConflictError;
       }
     }
-    this.records = remaining;
+    this.records = this.records.filter((record) => !completed.has(record.id));
+    for (const record of this.records) {
+      const nextETag = etags.get(record.path);
+      if (record.op === "write" && nextETag) record.etag = nextETag;
+    }
     await this.save();
-    return { pending: remaining.length, conflict };
+    return { conflict, etags: Object.fromEntries(etags), completed: completed.size, failures };
   }
 }

@@ -1,19 +1,16 @@
 import {
-  MAX_READ,
   RemoteObjectBackend,
   WorkspaceJournal,
   base64ToBytes,
   bytesToBase64,
   normalizePath,
   parseCommand,
-} from "/workspace-runtime.js";
+} from "./workspace-runtime.js";
 
-(() => {
-  "use strict";
+const COMMANDS = ["help", "ls", "pwd", "cd", "cat", "touch", "mkdir", "write", "clear", "sync"];
+const ETAG_CACHE_PATH = "/.shenmux-etags.json";
 
-  const COMMANDS = ["help", "ls", "pwd", "cd", "cat", "touch", "mkdir", "write", "clear", "sync"];
-
-  class LocalOPFSWorkspace {
+class LocalOPFSWorkspace {
     constructor(root) { this.root = root; }
     normalize(path, base = "/") { return normalizePath(path, base); }
     parts(path) { return normalizePath(path).split("/").filter(Boolean); }
@@ -68,7 +65,7 @@ import {
 
   // The WIT host functions are synchronous. This cache prepares the needed
   // directory/file window asynchronously, then exposes only memory to WASI.
-  class CachedWorkspaceHost {
+export class CachedWorkspaceHost {
     constructor(local, remote = null) {
       this.local = local;
       this.remote = remote;
@@ -85,6 +82,12 @@ import {
 
     async init() {
       await this.journal.load();
+      try {
+        const savedETags = JSON.parse(await this.local.read(ETAG_CACHE_PATH));
+        this.etags = new Map(Object.entries(savedETags).filter(([, value]) => typeof value === "string"));
+      } catch (_) {
+        this.etags = new Map();
+      }
       if (!this.remote) {
         try { await this.local.readBytes("/README.md"); }
         catch (_) {
@@ -94,6 +97,10 @@ import {
         }
       }
       await this.loadDir("/");
+    }
+
+    async saveETags() {
+      await this.local.write(ETAG_CACHE_PATH, JSON.stringify(Object.fromEntries(this.etags)));
     }
 
     async loadDir(path) {
@@ -109,18 +116,42 @@ import {
       path = this.normalize(path);
       if (this.files.has(path)) return this.files.get(path);
       let bytes;
-      let etag = "";
+      let local = false;
       try {
         bytes = await this.local.readBytes(path);
-      } catch (_) {
-        if (!this.remote) throw new Error(`file not found: ${path}`);
-        const result = await this.remote.read(path, 0, MAX_READ);
-        bytes = result.bytes;
-        etag = result.etag;
-        await this.local.writeBytes(path, bytes);
+        local = true;
+      } catch (_) {}
+      const pending = [...this.journal.records].reverse()
+        .find((record) => record.op === "write" && this.normalize(record.path) === path);
+      if (pending) {
+        if (!local) {
+          bytes = base64ToBytes(pending.data);
+          await this.local.writeBytes(path, bytes);
+          local = true;
+        }
+        if (!this.etags.has(path) && pending.etag) this.etags.set(path, pending.etag);
+      } else if (this.remote) {
+        const cachedETag = local ? this.etags.get(path) || "" : "";
+        try {
+          const result = await this.remote.readAll(path, { etag: cachedETag });
+          if (result.notModified) {
+            if (!local) throw new Error(`remote workspace returned not-modified without a cached file: ${path}`);
+          } else {
+            bytes = result.bytes;
+            await this.local.writeBytes(path, bytes);
+            local = true;
+          }
+          if (result.etag) {
+            this.etags.set(path, result.etag);
+            await this.saveETags();
+          }
+        } catch (error) {
+          if (!local || !cachedETag) throw error;
+          this.syncState = "offline";
+        }
       }
+      if (!local) throw new Error(`file not found: ${path}`);
       this.files.set(path, bytes);
-      this.etags.set(path, etag);
       return bytes;
     }
 
@@ -128,11 +159,16 @@ import {
       const args = parseCommand(command);
       const name = args[0];
       if (["ls", "cd"].includes(name)) await this.loadDir(this.normalize(args[1] || "/", cwd));
-      else if (name === "cat") await this.loadFile(this.normalize(args[1] || "", cwd));
-      else if (["touch", "write", "mkdir"].includes(name)) {
+      else if (name === "cat") {
         const path = this.normalize(args[1] || "", cwd);
         await this.loadDir(this.normalize(`${path}/..`));
-        if (name === "touch" && this.entries.get(this.normalize(`${path}/..`))?.has(path.split("/").pop())) {
+        await this.loadFile(path);
+      }
+      else if (["touch", "write", "mkdir"].includes(name)) {
+        const path = this.normalize(args[1] || "", cwd);
+        const parent = this.normalize(`${path}/..`);
+        await this.loadDir(parent);
+        if (["touch", "write"].includes(name) && this.entries.get(parent)?.has(path.split("/").pop())) {
           await this.loadFile(path);
         }
       }
@@ -195,13 +231,16 @@ import {
     }
 
     async flush() {
-      if (!this.remote) return { pending: 0, conflict: false };
+      if (!this.remote) return { pending: 0, conflict: false, etags: {} };
       const result = await this.journal.flush(this.remote);
+      for (const [path, etag] of Object.entries(result.etags)) this.etags.set(path, etag);
+      if (Object.keys(result.etags).length) await this.saveETags();
       this.syncState = result.conflict ? "conflict" : result.pending ? "offline" : "synced";
       return result;
     }
   }
 
+if (typeof document !== "undefined") {
   const fileList = document.querySelector("#file-list");
   const editor = document.querySelector("#editor");
   const fileName = document.querySelector("#file-name");
@@ -212,9 +251,10 @@ import {
   const commandPrompt = document.querySelector("#command-prompt");
   const storageStatus = document.querySelector("#storage-status");
   const saveStatus = document.querySelector("#save-status");
+  const saveFileButton = document.querySelector("#save-file");
   let workspace;
   let cwd = "/";
-  let openPath = "/README.md";
+  let openPath = null;
   let history = [];
   let historyIndex = 0;
   let running = false;
@@ -268,6 +308,7 @@ import {
     openPath = path;
     editor.value = await workspace.read(path);
     fileName.textContent = displayPath(path);
+    saveFileButton.disabled = false;
     fileMeta.textContent = `${runtimeLabel} · ${(performance.now() - started).toFixed(1)} ms`;
     await refreshFiles();
     editor.focus();
@@ -394,7 +435,17 @@ import {
       print(`WASI component unavailable · ${error.message}`, "hint");
       throw error;
     }
-    await openFile(openPath);
+    const initialFile = workspace.host.listEntries("/").find((entry) => entry.kind === "file");
+    if (initialFile) {
+      await openFile(workspace.normalize(`/${initialFile.name}`));
+    } else {
+      editor.value = "";
+      editor.placeholder = "This workspace is empty. Create or select a file to begin.";
+      fileName.textContent = "empty workspace";
+      fileMeta.textContent = runtimeLabel;
+      saveFileButton.disabled = true;
+      await refreshFiles();
+    }
     print(`ready · ${runtimeLabel} · Tab completes · ↑↓ history · Ctrl-L clears`);
     const estimate = await navigator.storage.estimate();
     const used = estimate.usage ? `${(estimate.usage / 1024 / 1024).toFixed(1)} MB` : "local";
@@ -405,7 +456,8 @@ import {
     commandInput.focus();
   }
 
-  document.querySelector("#save-file").addEventListener("click", async () => {
+  saveFileButton.addEventListener("click", async () => {
+    if (!openPath) return;
     const started = performance.now();
     await workspace.write(openPath, editor.value);
     saveStatus.textContent = `saved locally in ${(performance.now() - started).toFixed(1)} ms`;
@@ -445,4 +497,4 @@ import {
     if ((event.metaKey || event.ctrlKey) && event.key === "s") { event.preventDefault(); document.querySelector("#save-file").click(); }
   });
   start().catch((error) => { commandInput.disabled = true; storageStatus.textContent = `workspace unavailable · ${error.message}`; print(error.message, "error"); });
-})();
+}

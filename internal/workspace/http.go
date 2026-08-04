@@ -63,6 +63,10 @@ func Handler(cfg HTTPConfig) http.Handler {
 			}
 			w.Header().Set("ETag", result.ETag)
 			w.Header().Set("Accept-Ranges", "bytes")
+			if etagMatches(r.Header.Get("If-None-Match"), result.ETag) {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
 			w.Header().Set("Content-Length", strconv.Itoa(len(result.Data)))
 			if partial {
 				if len(result.Data) > 0 {
@@ -98,6 +102,16 @@ func Handler(cfg HTTPConfig) http.Handler {
 			http.NotFound(w, r)
 		}
 	})
+}
+
+func etagMatches(value, current string) bool {
+	for _, candidate := range strings.Split(value, ",") {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "*" || candidate == current || strings.TrimPrefix(candidate, "W/") == current {
+			return candidate != ""
+		}
+	}
+	return false
 }
 
 func operationFor(r *http.Request) string {

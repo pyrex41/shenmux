@@ -36,18 +36,18 @@ const evaluate = async (expression) => {
   if (result.result?.exceptionDetails) throw new Error(result.result.exceptionDetails.text || "browser evaluation failed");
   return result.result?.result?.value;
 };
-const submit = (text) => `(async()=>{const input=document.querySelector("#command-input"); input.value=${JSON.stringify(text)}; input.form.requestSubmit(); await new Promise(r=>setTimeout(r,250)); return document.querySelector("#command-output").innerText})()`;
+const submit = (text, expected) => `(async()=>{const input=document.querySelector("#command-input"); input.value=${JSON.stringify(text)}; input.form.requestSubmit(); const deadline=Date.now()+5000; while(Date.now()<deadline){const output=document.querySelector("#command-output").innerText; if(output.includes(${JSON.stringify(expected)})) return output; await new Promise(r=>setTimeout(r,50));} return document.querySelector("#command-output").innerText})()`;
 
 const ready = await evaluate(`!document.querySelector("#command-input").disabled`);
 assert.equal(ready, true, "workspace command input did not become ready");
 const marker = `browser-${Date.now()}`;
-const writeOutput = await evaluate(submit(`write notes/browser-test.txt ${marker}`));
+const writeOutput = await evaluate(submit(`write notes/browser-test.txt ${marker}`, "saved notes/browser-test.txt"));
 assert.match(writeOutput, new RegExp(`saved notes/browser-test\\.txt`));
-const readOutput = await evaluate(submit("cat notes/browser-test.txt"));
+const readOutput = await evaluate(submit("cat notes/browser-test.txt", marker));
 assert.match(readOutput, new RegExp(marker));
 await command("Page.reload");
 await new Promise((resolve) => setTimeout(resolve, 1000));
-const persisted = await evaluate(submit("cat notes/browser-test.txt"));
+const persisted = await evaluate(submit("cat notes/browser-test.txt", marker));
 assert.match(persisted, new RegExp(marker));
 socket.close();
 console.log("workspace browser smoke test passed");

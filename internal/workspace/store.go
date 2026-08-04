@@ -81,6 +81,9 @@ func (s *LocalStore) List(path string) ([]Entry, error) {
 		if strings.HasPrefix(entry.Name(), ".shenmux-") {
 			continue
 		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
 		kind := "file"
 		size := int64(0)
 		if entry.IsDir() {
@@ -219,9 +222,30 @@ func (s *LocalStore) resolve(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", err
+	}
 	resolved := filepath.Join(root, strings.TrimPrefix(clean, "/"))
 	if resolved != root && !strings.HasPrefix(resolved, root+string(filepath.Separator)) {
 		return "", ErrInvalidPath
+	}
+	current := root
+	for _, part := range strings.Split(strings.TrimPrefix(clean, "/"), "/") {
+		if part == "" {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, statErr := os.Lstat(current)
+		if errors.Is(statErr, os.ErrNotExist) {
+			break
+		}
+		if statErr != nil {
+			return "", statErr
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", ErrInvalidPath
+		}
 	}
 	return resolved, nil
 }

@@ -117,6 +117,8 @@ Requirements:
 - Go 1.23 or newer.
 - Cgo on Linux or macOS for the working PTY and ZeroMQ transport.
 - A libzmq 4.x runtime. Linux links directly to the stable `libzmq.so.5` ABI and does not require ZeroMQ headers. On macOS, install `zeromq` so `-lzmq` is available.
+- Node.js and `npm ci --prefix web` for rebuilding the embedded browser assets.
+- Optional: Rust with the `wasm32-wasip2` target for regenerating the checked-in workspace component via `make workspace-test`.
 - Optional: a current `libghostty-vt` header and library for `-tags libghostty`.
 
 Typical Debian/Ubuntu setup:
@@ -151,7 +153,9 @@ minimum), ZeroMQ, pkg-config, and the native build tools for Linux and macOS.
 set `SHEN_BIN` to a supported launcher. The check fails loudly when no launcher
 is available; semantic verification is never silently skipped.
 
-The normal build uses the dependency-free VT metadata tracker and the replay journal:
+The normal build uses the dependency-free VT metadata tracker, replay journal,
+and checked-in browser workspace component. Rust is only needed when that
+component is regenerated:
 
 ```sh
 go build -o bin/shenmux ./cmd/shenmux

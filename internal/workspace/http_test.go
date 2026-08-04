@@ -54,6 +54,14 @@ func TestLocalStoreAndCapabilityHTTP(t *testing.T) {
 	if read.Code != http.StatusOK || read.Body.String() != "hello workspace" {
 		t.Fatalf("read = %d %q", read.Code, read.Body.String())
 	}
+	notModifiedRequest := httptest.NewRequest(http.MethodGet, "/objects?path=/notes/demo.txt", nil)
+	notModifiedRequest.Header.Set("Authorization", "Bearer cap-test")
+	notModifiedRequest.Header.Set("If-None-Match", etag)
+	notModified := httptest.NewRecorder()
+	handler.ServeHTTP(notModified, notModifiedRequest)
+	if notModified.Code != http.StatusNotModified || notModified.Body.Len() != 0 {
+		t.Fatalf("conditional read = %d %q", notModified.Code, notModified.Body.String())
+	}
 	// Issue a range request explicitly so the service exercises lazy reads.
 	rangeRequest := httptest.NewRequest(http.MethodGet, "/objects?path=/notes/demo.txt", nil)
 	rangeRequest.Header.Set("Authorization", "Bearer cap-test")
@@ -82,5 +90,33 @@ func TestLocalStoreRejectsTraversal(t *testing.T) {
 	store := NewLocalStore(t.TempDir())
 	if _, err := store.List("/../secret"); err != ErrInvalidPath {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestLocalStoreRejectsSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret"), []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	store := NewLocalStore(root)
+	if _, err := store.Read("/link/secret", 0, 0); err != ErrInvalidPath {
+		t.Fatalf("read through symlink: got %v", err)
+	}
+	if _, err := store.Write("/link/new", []byte("escape"), "", "write-link"); err != ErrInvalidPath {
+		t.Fatalf("write through symlink: got %v", err)
+	}
+	if err := store.Mkdir("/link/new-dir", "mkdir-link"); err != ErrInvalidPath {
+		t.Fatalf("mkdir through symlink: got %v", err)
+	}
+	entries, err := store.List("/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("symlink leaked through manifest: %+v", entries)
 	}
 }
