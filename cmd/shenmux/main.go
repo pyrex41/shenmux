@@ -689,6 +689,7 @@ func runController(ctx context.Context, args []string, stderr io.Writer) error {
 	flags := newFlags("shenmux controller", stderr)
 	listen := flags.String("listen", "127.0.0.1:8788", "HTTPS/WSS controller listen address (HTTP for local development)")
 	origin := flags.String("origin", "http://localhost", "controller origin bound into agent challenge proofs")
+	enrollmentCount := flags.Int("enrollment-count", 1, "number of single-use enrollment codes to print")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -699,10 +700,6 @@ func runController(ctx context.Context, args []string, stderr io.Writer) error {
 		return errors.New("controller does not accept positional arguments")
 	}
 	store := relay.NewEnrollmentStore()
-	code, err := store.Create(10 * time.Minute)
-	if err != nil {
-		return err
-	}
 	controller := relay.NewController(store, *origin)
 	httpServer := &http.Server{Addr: *listen, Handler: controller}
 	go func() {
@@ -711,7 +708,18 @@ func runController(ctx context.Context, args []string, stderr io.Writer) error {
 		defer cancel()
 		_ = httpServer.Shutdown(shutdown)
 	}()
-	log.New(stderr, "", 0).Printf("shenmux controller listen=http://%s enrollment_code=%s", *listen, code)
+	if *enrollmentCount < 1 || *enrollmentCount > 100 {
+		return errors.New("--enrollment-count must be between 1 and 100")
+	}
+	codes := make([]string, *enrollmentCount)
+	for i := range codes {
+		code, createErr := store.Create(10 * time.Minute)
+		if createErr != nil {
+			return createErr
+		}
+		codes[i] = code
+	}
+	log.New(stderr, "", 0).Printf("shenmux controller listen=http://%s enrollment_codes=%s", *listen, strings.Join(codes, ","))
 	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
