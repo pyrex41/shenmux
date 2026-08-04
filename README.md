@@ -1,10 +1,10 @@
 # shenmux
 
-A Shen-controlled terminal session multiplexer with a Go host runtime, ZeroMQ transport, a real Unix PTY, and an optional `libghostty-vt` state engine.
+A Shen-controlled terminal session multiplexer with a Go host runtime, a real Unix PTY, an authenticated outbound relay, and an optional `libghostty-vt` state engine. ZeroMQ remains the local IPC transport.
 
 The design has one authoritative process and PTY writer, many attached readers, a targeted snapshot followed by an ordered broadcast stream, and a single sequence spanning PTY output, resizes, and process exit. Shen owns the pure control-plane reducer: it validates commands, evolves session state, returns rejection reasons, and describes effects. Go owns the impure edges (PTY, terminal, ZeroMQ, clocks, persistence, and effect execution).
 
-> Status: working prototype. The daemon/client, PTY, ZeroMQ control and data planes, replay snapshots, resynchronization primitives, Shen reducer drift/semantic gates, and end-to-end tests are implemented. The optional `libghostty-vt` adapter is present but was not linked in this build environment.
+> Status: V2 relay and transport foundations are implemented. The daemon/client, PTY, local IPC, authenticated enrollment, reconnecting agent tunnel, browser capability endpoint, blind relay framing, policy/revocation metadata, and direct Tailscale/WireGuard path selection are covered by tests. The optional `libghostty-vt` adapter is present but was not linked in this build environment.
 
 ## Architecture
 
@@ -68,6 +68,32 @@ durable ACL/capability/control-lease/revocation/audit metadata, while
 `internal/update` verifies signed update manifests. These are transport and
 policy foundations; local-first leadership and PTY handoff remain future work.
 
+### Remote/self-hosted setup
+
+The controller command is a small development/self-hosted endpoint. It prints
+a single-use enrollment code when it starts:
+
+```sh
+shenmux controller --listen 127.0.0.1:8788 --origin https://controller.example
+```
+
+For a remote deployment, place the controller behind a TLS reverse proxy and
+publish only HTTPS/WSS. The built-in listener is plain HTTP for local
+development; agents use the corresponding `https://` controller URL and
+automatically upgrade the relay connection to WSS:
+
+```sh
+shenmux login --controller https://controller.example --code CODE_FROM_CONTROLLER
+shenmux agent --controller https://controller.example --transport relay
+```
+
+The agent persists its device key, token, controller, and transport preference
+in the XDG state/config directories. It needs only outbound HTTPS/DNS access
+in relay mode. Browser clients authenticate to the controller, request a
+short-lived capability from `/capabilities`, and attach over `/browser`; the
+controller routes session frames to the enrolled agent. `shenmux web` remains
+the local-only gateway for the existing PTY/ZeroMQ path.
+
 ## Build
 
 Requirements:
@@ -112,6 +138,7 @@ is available; semantic verification is never silently skipped.
 The normal build uses the dependency-free VT metadata tracker and the replay journal:
 
 ```sh
+go build -o bin/shenmux ./cmd/shenmux
 go build -o bin/muxd ./cmd/muxd
 go build -o bin/muxctl ./cmd/muxctl
 go build -o bin/shenmux-web ./cmd/shenmux-web
@@ -125,7 +152,13 @@ CGO_ENABLED=0 go build ./...
 
 ## Run
 
-Start a session around the default shell:
+Start a local session around the default shell with the binary-first command:
+
+```sh
+./bin/shenmux run --session work
+```
+
+The legacy daemon command remains supported:
 
 ```sh
 ./bin/muxd -session work
@@ -151,12 +184,14 @@ Attach from another terminal:
 ./bin/muxctl -session work
 ```
 
-The browser client is a small WebSocket gateway and embedded PixiJS terminal.
-Run it beside `muxd`, then open `http://localhost:8787`:
+The local browser client is a small WebSocket gateway and embedded PixiJS
+terminal. Run it beside the session, then open `http://localhost:8787`:
 
 ```sh
-./bin/shenmux-web -session work
+./bin/shenmux web -session work
 ```
+
+The legacy `shenmux-web` executable remains supported as well.
 
 See [docs/WEB.md](docs/WEB.md) for the prototype's protocol and UI notes.
 
@@ -169,12 +204,12 @@ For a noninteractive smoke test:
 printf 'hello\n' | ./bin/muxctl -no-raw -session smoke
 ```
 
-## Fly.io deployment
+## Fly.io deployment (legacy local-IPC prototype)
 
-The repository includes a Dockerfile and `fly.toml` for a single long-lived
-Machine. The image binds the control and data ZeroMQ sockets to private TCP
-ports 5555 and 5556. The config intentionally does not publish raw TCP
-services; use `fly proxy` from the client machine instead.
+The repository still includes a Dockerfile and `fly.toml` for the original
+`muxd`/ZeroMQ prototype. It is not the V2 controller deployment and must not be
+exposed as a public service: the TCP transport has no application-level
+authentication. Use it only for local testing through `fly proxy`:
 
 Install and authenticate with `flyctl`, change `app` in `fly.toml` to a unique
 name, then create and deploy the app:
@@ -202,9 +237,13 @@ nix develop
 
 The default remote shell is zsh. Set `SHENMUX_SHELL=/usr/bin/fish` and
 `SHENMUX_SHELL_ARGS=-il` with `fly secrets` or in `[env]` if the image should
-start fish instead. The current TCP transport has no application-level
-authentication, so do not add public TCP services until an authenticated
-transport policy is implemented.
+start fish instead.
+
+For V2 on Fly, run `shenmux controller` behind Fly's HTTPS ingress (or a TLS
+proxy) and run `shenmux agent` on the Fly Machine. The agent then makes
+outbound WSS connections; do not publish ports 5555/5556 for remote clients.
+The same controller/agent arrangement applies on AWS, Hetzner, and a home
+server, with only outbound HTTPS required from the agent host.
 
 ## Shen source of truth
 
