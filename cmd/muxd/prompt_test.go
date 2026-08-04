@@ -44,6 +44,22 @@ func TestPrepareZshDemoEnvironment(t *testing.T) {
 	}
 }
 
+func TestKeepaliveShellCommandWrapsLoginShell(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh is not installed")
+	}
+	command, err := keepaliveShellCommand([]string{"/bin/zsh", "-il"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(command) != 5 || command[1] != "-c" || command[3] != "/bin/zsh" || command[4] != "-il" {
+		t.Fatalf("unexpected keepalive command: %q", command)
+	}
+	if !strings.Contains(command[2], `"$0" "$@"`) || !strings.Contains(command[2], "sleep 0.1") {
+		t.Fatalf("keepalive loop does not restart the shell: %q", command[2])
+	}
+}
+
 func containsEnv(env []string, want string) bool {
 	for _, entry := range env {
 		if entry == want {

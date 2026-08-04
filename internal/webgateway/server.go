@@ -204,7 +204,7 @@ func (s *Server) handleCommand(ctx context.Context, mux *client.Client, cmd comm
 	defer cancel()
 	switch strings.ToLower(cmd.Type) {
 	case "input":
-		return mux.Input(callCtx, []byte(cmd.Data))
+		return mux.SendInput(callCtx, []byte(cmd.Data))
 	case "resize":
 		return mux.Resize(callCtx, cmd.Cols, cmd.Rows)
 	case "acquire":

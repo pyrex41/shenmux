@@ -259,6 +259,21 @@ func (c *Client) Input(ctx context.Context, payload []byte) error {
 	return err
 }
 
+// SendInput queues input on the ordered control actor and returns once the
+// bytes have been handed to the ZeroMQ socket. Unlike Input, it does not wait
+// for muxd's acknowledgement. This is intended for latency-sensitive clients
+// such as the browser; control and resize operations should continue to use
+// their acknowledged variants.
+func (c *Client) SendInput(ctx context.Context, payload []byte) error {
+	if len(payload) == 0 {
+		return nil
+	}
+	if len(payload) > 1<<20 {
+		return fmt.Errorf("input exceeds %d bytes", 1<<20)
+	}
+	return c.control.Send(ctx, c.message(protocol.KindInput, append([]byte(nil), payload...)))
+}
+
 func (c *Client) Resize(ctx context.Context, cols, rows int) error {
 	dim, err := shenguard.NewDimensions(cols, rows)
 	if err != nil {

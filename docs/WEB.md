@@ -9,7 +9,7 @@ Start the daemon in one shell, then the gateway in another:
 
 ```sh
 nix develop
-./bin/muxd -session default
+./bin/muxd -session default -keepalive
 go run ./cmd/shenmux-web -session default
 ```
 
@@ -47,3 +47,26 @@ screen publications.
 The demo shell also removes an inherited `NO_COLOR=1` setting and advertises
 `COLORTERM=truecolor`; otherwise applications such as Claude Code may disable
 color before the browser ever receives a styled cell.
+
+Use `-keepalive` for browser sessions: if the login shell exits (including
+Ctrl-D), the PTY supervisor starts a fresh login shell without dropping the
+session or browser connection. Explicit commands supplied after `--` are
+still one-shot commands.
+
+## Input latency benchmark
+
+For a repeatable transport baseline, run an echo-only PTY and gateway on a
+separate port, then use the checked-in Node harness:
+
+```sh
+./bin/muxd -session bench -- sh -c 'stty -icanon -echo; exec cat'
+./bin/shenmux-web -session bench -listen 127.0.0.1:8789
+nix develop --command node scripts/bench-web-latency.mjs \
+  --url ws://127.0.0.1:8789/ws --count 200 --warmup 20
+```
+
+The result measures WebSocket input send through the gateway and muxd until
+the first echoed screen delta arrives. It does not include browser input
+processing or paint; use Chrome's Performance panel for those segments. Run
+the same harness with a 50--100 ms network profile when comparing remote
+deployments.

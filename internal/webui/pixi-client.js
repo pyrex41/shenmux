@@ -351,7 +351,10 @@ import Shen from "shen-script";
 
   async function start() {
     app = new Application();
-    await app.init({ background: "#080b10", antialias: false, preference: ["webgl", "canvas"], resolution: window.devicePixelRatio || 1, autoDensity: true });
+    // Rendering is explicitly coalesced through scheduleRender(). Disable
+    // Pixi's continuous ticker so each publication produces at most one
+    // render, rather than competing with the ticker's automatic render loop.
+    await app.init({ background: "#080b10", antialias: false, preference: ["webgl", "canvas"], resolution: window.devicePixelRatio || 1, autoDensity: true, autoStart: false });
     app.canvas.tabIndex = 0;
     app.canvas.setAttribute("aria-label", "shenmux terminal");
     host.replaceChildren(app.canvas);
