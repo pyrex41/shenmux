@@ -30,9 +30,15 @@ func (f *fakeSession) Attach(context.Context) (muxclient.Snapshot, error) {
 func (f *fakeSession) Resync(ctx context.Context) (muxclient.Snapshot, error) { return f.Attach(ctx) }
 func (f *fakeSession) Input(context.Context, []byte) error                    { return nil }
 func (f *fakeSession) Resize(context.Context, int, int) error                 { return nil }
-func (f *fakeSession) Detach(context.Context) error                           { return nil }
-func (f *fakeSession) Events() <-chan protocol.Message                        { return f.events }
-func (f *fakeSession) Close() error                                           { f.closed = true; close(f.events); return nil }
+func (f *fakeSession) AcquireControl(context.Context) (protocol.Meta, error) {
+	return protocol.Meta{Version: protocol.Version}, nil
+}
+func (f *fakeSession) ReleaseControl(context.Context) (protocol.Meta, error) {
+	return protocol.Meta{Version: protocol.Version}, nil
+}
+func (f *fakeSession) Detach(context.Context) error    { return nil }
+func (f *fakeSession) Events() <-chan protocol.Message { return f.events }
+func (f *fakeSession) Close() error                    { f.closed = true; close(f.events); return nil }
 
 func TestBridgeMultiplexesAttachToLocalSession(t *testing.T) {
 	fake := &fakeSession{events: make(chan protocol.Message)}

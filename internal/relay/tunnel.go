@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -267,6 +268,7 @@ func (c *Controller) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
+			log.Printf("relay agent %s read closed: %v", deviceID, err)
 			return
 		}
 		env, err := Decode(data)
@@ -376,11 +378,13 @@ func (c *Controller) handleBrowser(w http.ResponseWriter, r *http.Request) {
 	}()
 	go c.watchStreamAuthorization(stream)
 	if err := controllerWrite(agent, first); err != nil {
+		log.Printf("relay browser %s/%s -> agent write: %v", key.device, key.session, err)
 		return
 	}
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
+			log.Printf("relay browser %s/%s read closed: %v", key.device, key.session, err)
 			return
 		}
 		env, err := Decode(data)
@@ -398,6 +402,7 @@ func (c *Controller) handleBrowser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := controllerWrite(agent, data); err != nil {
+			log.Printf("relay browser %s/%s session write: %v", key.device, key.session, err)
 			return
 		}
 		if env.Header.FrameType == FrameClose {

@@ -660,7 +660,11 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 			}
 			return naming.DefaultEndpoints(session)
 		})
-		return bridge.Serve(ctx, conn)
+		bridgeErr := bridge.Serve(ctx, conn)
+		if bridgeErr != nil && !errors.Is(bridgeErr, context.Canceled) {
+			log.New(stderr, "", 0).Printf("agent bridge disconnected: %v", bridgeErr)
+		}
+		return bridgeErr
 	})
 	if errors.Is(err, context.Canceled) {
 		return nil

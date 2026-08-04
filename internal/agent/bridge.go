@@ -20,6 +20,8 @@ type sessionClient interface {
 	Resync(context.Context) (muxclient.Snapshot, error)
 	Input(context.Context, []byte) error
 	Resize(context.Context, int, int) error
+	AcquireControl(context.Context) (protocol.Meta, error)
+	ReleaseControl(context.Context) (protocol.Meta, error)
 	Detach(context.Context) error
 	Events() <-chan protocol.Message
 	Close() error
@@ -157,6 +159,18 @@ func (b *Bridge) handleMessage(ctx context.Context, conn *websocket.Conn, env re
 			return err
 		}
 		response = protocol.Message{Kind: protocol.KindPong, Meta: msg.Meta}
+	case protocol.KindAcquireControl:
+		meta, err := active.client.AcquireControl(callCtx)
+		if err != nil {
+			return err
+		}
+		response = protocol.Message{Kind: protocol.KindPong, Meta: meta}
+	case protocol.KindReleaseControl:
+		meta, err := active.client.ReleaseControl(callCtx)
+		if err != nil {
+			return err
+		}
+		response = protocol.Message{Kind: protocol.KindPong, Meta: meta}
 	case protocol.KindDetach:
 		if err := active.client.Detach(callCtx); err != nil {
 			return err
