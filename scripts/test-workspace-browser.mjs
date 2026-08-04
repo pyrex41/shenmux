@@ -52,6 +52,29 @@ const commandRowAligned = await evaluate(`(() => {
   return Math.abs((input.top + input.height / 2) - (hint.top + hint.height / 2)) < 1;
 })()`);
 assert.equal(commandRowAligned, true, "Tab completion hint is not aligned with the command input");
+const completionsInline = await evaluate(`(async () => {
+  const input = document.querySelector("#command-input");
+  input.value = "cat ";
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  input.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
+  const deadline = Date.now() + 1000;
+  while (!document.querySelector("#command-form").classList.contains("has-completions") && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const entry = document.querySelector("#command-form").getBoundingClientRect();
+  const candidates = document.querySelector("#command-completions");
+  const bounds = candidates.getBoundingClientRect();
+  const inputBounds = input.getBoundingClientRect();
+  const result = candidates.textContent.includes("README.md")
+    && Math.abs((entry.top + entry.height / 2) - (bounds.top + bounds.height / 2)) < 1
+    && bounds.left >= inputBounds.right
+    && bounds.left - inputBounds.right <= 12
+    && !document.querySelector("#command-output").innerText.includes("notes/  README.md");
+  input.value = "";
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  return result;
+})()`);
+assert.equal(completionsInline, true, "Tab completion candidates are not shown in the command row");
 const marker = `browser-${Date.now()}`;
 const writeOutput = await evaluate(submit(`write notes/browser-test.txt ${marker}`, "saved notes/browser-test.txt"));
 assert.match(writeOutput, new RegExp(`saved notes/browser-test\\.txt`));

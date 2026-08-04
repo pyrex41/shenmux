@@ -48,7 +48,13 @@ a:hover { text-decoration: underline; }
 .command-line.error { color: #ff8f9c; }
 .command-form { display: flex; flex-wrap: nowrap; align-items: center; gap: 10px; padding: 0 16px; border-top: 1px solid var(--line); }
 .prompt { flex: none; color: var(--accent); font-weight: 700; }
-#command-input { flex: 1 1 auto; min-width: 0; width: auto; border: 0; outline: 0; background: transparent; color: var(--text); }
+.command-input-shell { position: relative; flex: 1 1 auto; min-width: 0; height: 1.45em; }
+#command-input-measure { display: block; min-width: 1ch; padding-right: .5ch; visibility: hidden; white-space: pre; }
+#command-input { position: absolute; inset: 0; width: 100%; border: 0; outline: 0; background: transparent; color: var(--text); padding: 0; }
+.command-completions { display: none; flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: pre; }
+.command-form.has-completions .command-input-shell { flex: 0 1 auto; max-width: 60%; }
+.command-form.has-completions .command-completions { display: block; }
+.command-form.has-completions .command-hint { display: none; }
 .command-hint { flex: none; color: var(--muted); font-size: 11px; white-space: nowrap; }
 .command-hint kbd { border: 1px solid #334252; border-bottom-color: #46586b; border-radius: 3px; background: var(--panel-2); color: #aebdcd; padding: 1px 4px; font: inherit; }
 @media (max-width: 720px) {

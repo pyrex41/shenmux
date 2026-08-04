@@ -34,7 +34,11 @@
             <div id="command-output" class="command-output" role="log" aria-live="polite"></div>
             <form id="command-form" class="command-form">
               <span id="command-prompt" class="prompt">λ /</span>
-              <input id="command-input" autocomplete="off" spellcheck="false" aria-label="Workspace command" placeholder="try: ls, cat README.md, or write notes/today.md hello" disabled>
+              <span class="command-input-shell">
+                <span id="command-input-measure" aria-hidden="true">&nbsp;</span>
+                <input id="command-input" autocomplete="off" spellcheck="false" aria-label="Workspace command" aria-describedby="command-completions" placeholder="try: ls, cat README.md, or write notes/today.md hello" disabled>
+              </span>
+              <span id="command-completions" class="command-completions" aria-live="polite"></span>
               <span class="command-hint" aria-hidden="true"><kbd>Tab</kbd> complete</span>
             </form>
           </section>

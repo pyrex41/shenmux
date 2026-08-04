@@ -249,6 +249,8 @@ if (typeof document !== "undefined") {
   const commandOutput = document.querySelector("#command-output");
   const commandForm = document.querySelector("#command-form");
   const commandPrompt = document.querySelector("#command-prompt");
+  const commandInputMeasure = document.querySelector("#command-input-measure");
+  const commandCompletions = document.querySelector("#command-completions");
   const storageStatus = document.querySelector("#storage-status");
   const saveStatus = document.querySelector("#save-status");
   const saveFileButton = document.querySelector("#save-file");
@@ -265,6 +267,15 @@ if (typeof document !== "undefined") {
   const displayPath = (path) => path === "/" ? "/" : path.slice(1);
   const promptText = () => `λ ${cwd}`;
   const setPrompt = () => { commandPrompt.textContent = promptText(); };
+  const syncCommandInputWidth = () => { commandInputMeasure.textContent = commandInput.value || " "; };
+  const hideCompletions = () => {
+    commandCompletions.textContent = "";
+    commandForm.classList.remove("has-completions");
+  };
+  const showCompletions = (candidates) => {
+    commandCompletions.textContent = candidates.join("  ");
+    commandForm.classList.add("has-completions");
+  };
   const print = (text, kind = "") => {
     const line = document.createElement("div");
     line.className = `command-line ${kind}`;
@@ -323,6 +334,8 @@ if (typeof document !== "undefined") {
     if (!history.length) return;
     historyIndex = Math.max(0, Math.min(history.length, historyIndex + direction));
     commandInput.value = historyIndex === history.length ? "" : history[historyIndex];
+    syncCommandInputWidth();
+    hideCompletions();
     requestAnimationFrame(() => commandInput.setSelectionRange(commandInput.value.length, commandInput.value.length));
   }
 
@@ -356,8 +369,10 @@ if (typeof document !== "undefined") {
     });
     const replacement = candidates.length === 1 ? candidates[0] : common;
     commandInput.value = `${value.slice(0, tokenStart)}${replacement}${value.slice(cursor)}`;
+    syncCommandInputWidth();
     commandInput.setSelectionRange(tokenStart + replacement.length, tokenStart + replacement.length);
-    if (candidates.length > 1 && replacement === token) print(candidates.join("  "), "hint");
+    if (candidates.length > 1 && replacement === token) showCompletions(candidates);
+    else hideCompletions();
     completion = { token, candidates };
   }
 
@@ -476,6 +491,8 @@ if (typeof document !== "undefined") {
     if (!text || running || !workspace) return;
     recordHistory(text);
     commandInput.value = "";
+    syncCommandInputWidth();
+    hideCompletions();
     completion = null;
     printCommand(text);
     running = true;
@@ -490,11 +507,19 @@ if (typeof document !== "undefined") {
     if (event.ctrlKey && event.key.toLowerCase() === "c") {
       event.preventDefault(); cancelGeneration++;
       if (commandInput.value || running) { printCommand(`${commandInput.value}^C`); commandInput.value = ""; }
+      syncCommandInputWidth();
+      hideCompletions();
       running = false;
     }
+  });
+  commandInput.addEventListener("input", () => {
+    syncCommandInputWidth();
+    hideCompletions();
+    completion = null;
   });
   editor.addEventListener("keydown", (event) => {
     if ((event.metaKey || event.ctrlKey) && event.key === "s") { event.preventDefault(); document.querySelector("#save-file").click(); }
   });
+  syncCommandInputWidth();
   start().catch((error) => { commandInput.disabled = true; storageStatus.textContent = `workspace unavailable · ${error.message}`; print(error.message, "error"); });
 }
