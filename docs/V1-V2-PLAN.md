@@ -151,6 +151,14 @@ Precedence is CLI, environment, user config, then defaults.
 | Hosted | `shenmux agent --controller URL` | Agent egress TCP 443/DNS; browser WSS to controller | Agent state locally; hosted controller DB |
 | Self-hosted | Agent plus `shenmux controller` | Controller HTTPS/WSS ingress; agent egress TCP 443/DNS | Agent state plus controller SQLite/Postgres |
 
+Kubernetes is a first-class self-hosted shape: run the controller behind an
+Ingress and inject `shenmux agent` as a sidecar into harness/orchestrator pods.
+The sidecar advertises namespace/workload/pod/harness/session metadata, can
+enroll once from a short-lived `SHENMUX_ENROLLMENT_CODE`, and bridges multiple
+remote streams to muxd sessions over shared IPC. Discovery is metadata-only via
+`GET /sessions`; terminal payloads continue through the existing capability-
+bound relay. See `deploy/kubernetes/` for controller and sidecar manifests.
+
 Fly, AWS, Hetzner, and a home server all use the same agent contract: install
 one binary, persist `/var/lib/shenmux` (or the documented XDG equivalent),
 permit outbound TCP 443/DNS, and run it under a service manager. No inbound
@@ -229,9 +237,10 @@ is not claimed until a separate worker-reconnect design exists.
     shipped agent accepts `--transport auto|relay|tailscale` and a
     `tailscale://`/`wireguard://` peer endpoint; `auto` prefers the tailnet
     path and retries through the authenticated relay when the peer is down.
-12. Add multi-session UI/inventory, native-client API compatibility, signed
-    releases with rollback, service-manager install/uninstall, and disaster
-    recovery drills.
+12. Add Kubernetes sidecar enrollment/session discovery and multi-session local
+    IPC bridging, then complete multi-session UI/inventory, native-client API
+    compatibility, signed releases with rollback, service-manager
+    install/uninstall, and disaster recovery drills.
 
 **V2 gate:** a compromised relay/storage path cannot reveal blind-mode terminal
 contents or forge endpoint frames under the stated trust assumptions;

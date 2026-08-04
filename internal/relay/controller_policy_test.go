@@ -17,6 +17,19 @@ import (
 	"github.com/pyrex41/shenmux/internal/protocol"
 )
 
+func TestControllerHealthz(t *testing.T) {
+	server := httptest.NewServer(NewController(nil, "test-controller"))
+	defer server.Close()
+	resp, err := http.Get(server.URL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("health status %d", resp.StatusCode)
+	}
+}
+
 type policyControllerFixture struct {
 	controller *Controller
 	server     *httptest.Server

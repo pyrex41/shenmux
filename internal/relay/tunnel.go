@@ -94,10 +94,11 @@ func (s *EnrollmentStore) authenticate(id string, token []byte) (ed25519.PublicK
 }
 
 type helloPayload struct {
-	DeviceID string `json:"device_id"`
-	Token    []byte `json:"token"`
-	Origin   string `json:"origin"`
-	Nonce    []byte `json:"nonce"`
+	DeviceID string        `json:"device_id"`
+	Token    []byte        `json:"token"`
+	Origin   string        `json:"origin"`
+	Nonce    []byte        `json:"nonce"`
+	Metadata AgentMetadata `json:"metadata,omitempty"`
 }
 
 type challengePayload struct {
@@ -122,8 +123,10 @@ type Controller struct {
 
 type streamKey struct{ device, session, stream string }
 type controllerAgent struct {
-	conn *websocket.Conn
-	mu   sync.Mutex // gorilla/websocket permits one concurrent writer only
+	conn        *websocket.Conn
+	metadata    AgentMetadata
+	connectedAt time.Time
+	mu          sync.Mutex // gorilla/websocket permits one concurrent writer only
 }
 
 type authorizedStream struct {
@@ -154,6 +157,13 @@ func NewController(store *EnrollmentStore, origin string) *Controller {
 
 func (c *Controller) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
+	case "/healthz":
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok\n"))
 	case "/enroll":
 		c.handleEnroll(w, r)
 	case "/ws":
@@ -162,6 +172,8 @@ func (c *Controller) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		c.handleCapability(w, r)
 	case "/browser":
 		c.handleBrowser(w, r)
+	case "/sessions":
+		c.handleSessions(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -192,7 +204,7 @@ func (c *Controller) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
-	deviceID, hsErr := c.handshake(conn)
+	deviceID, metadata, hsErr := c.handshake(conn)
 	if hsErr != nil {
 		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, hsErr.Error()), time.Now().Add(time.Second))
 		return
@@ -204,7 +216,7 @@ func (c *Controller) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Register the authenticated agent and route opaque stream envelopes until
 	// the connection closes. In blind mode the controller only decodes the
 	// routing header; payload bytes are forwarded without inspection.
-	agent := &controllerAgent{conn: conn}
+	agent := &controllerAgent{conn: conn, metadata: metadata, connectedAt: time.Now().UTC()}
 	c.mu.Lock()
 	if old := c.agents[deviceID]; old != nil && old.conn != conn {
 		_ = old.conn.Close()
@@ -620,48 +632,84 @@ func controllerWrite(agent *controllerAgent, data []byte) error {
 	return agent.conn.WriteMessage(websocket.BinaryMessage, data)
 }
 
-func (c *Controller) handshake(conn *websocket.Conn) (string, error) {
+func (c *Controller) handshake(conn *websocket.Conn) (string, AgentMetadata, error) {
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	defer conn.SetReadDeadline(time.Time{})
 	_, data, err := conn.ReadMessage()
 	if err != nil {
-		return "", err
+		return "", AgentMetadata{}, err
 	}
 	env, err := Decode(data)
 	if err != nil || env.Header.FrameType != FrameHello {
-		return "", errors.New("expected hello")
+		return "", AgentMetadata{}, errors.New("expected hello")
 	}
 	var hello helloPayload
 	if err := json.Unmarshal(env.Payload, &hello); err != nil {
-		return "", errors.New("invalid hello payload")
+		return "", AgentMetadata{}, errors.New("invalid hello payload")
 	}
 	pub, ok := c.Store.authenticate(hello.DeviceID, hello.Token)
 	if !ok || len(hello.Nonce) == 0 {
-		return "", errors.New("invalid device credential")
+		return "", AgentMetadata{}, errors.New("invalid device credential")
 	}
 	controllerNonce := make([]byte, 32)
 	if _, err := rand.Read(controllerNonce); err != nil {
-		return "", err
+		return "", AgentMetadata{}, err
 	}
 	challenge, _ := json.Marshal(challengePayload{Nonce: controllerNonce})
 	if err := writeEnvelope(conn, FrameChallenge, hello.DeviceID, 1, challenge); err != nil {
-		return "", err
+		return "", AgentMetadata{}, err
 	}
 	_, data, err = conn.ReadMessage()
 	if err != nil {
-		return "", err
+		return "", AgentMetadata{}, err
 	}
 	proofEnv, err := Decode(data)
 	if err != nil || proofEnv.Header.FrameType != FrameProof || proofEnv.Header.DeviceID != hello.DeviceID {
-		return "", errors.New("expected challenge proof")
+		return "", AgentMetadata{}, errors.New("expected challenge proof")
 	}
 	if err := VerifyChallenge(pub, proofEnv.Payload, Version, c.Origin, hello.DeviceID, hello.Nonce, controllerNonce); err != nil {
-		return "", err
+		return "", AgentMetadata{}, err
 	}
 	if err := writeEnvelope(conn, FrameReady, hello.DeviceID, 2, []byte(`{"version":1}`)); err != nil {
-		return "", err
+		return "", AgentMetadata{}, err
 	}
-	return hello.DeviceID, nil
+	return hello.DeviceID, hello.Metadata, nil
+}
+
+// DiscoveredSession is returned by GET /sessions. It is deliberately
+// metadata-only; terminal contents remain on the agent/browser stream.
+type DiscoveredSession struct {
+	DeviceID    string            `json:"device_id"`
+	Online      bool              `json:"online"`
+	ConnectedAt time.Time         `json:"connected_at,omitempty"`
+	Metadata    AgentMetadata     `json:"metadata"`
+	Session     SessionDescriptor `json:"session"`
+}
+
+func (c *Controller) handleSessions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if _, err := c.browserSubject(r); err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+	namespace, workload := r.URL.Query().Get("namespace"), r.URL.Query().Get("workload")
+	c.mu.Lock()
+	result := make([]DiscoveredSession, 0)
+	for deviceID, agent := range c.agents {
+		if namespace != "" && agent.metadata.Namespace != namespace || workload != "" && agent.metadata.Workload != workload {
+			continue
+		}
+		for _, session := range agent.metadata.Sessions {
+			result = append(result, DiscoveredSession{DeviceID: deviceID, Online: true, ConnectedAt: agent.connectedAt, Metadata: agent.metadata, Session: session})
+		}
+	}
+	c.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(result)
 }
 
 func writeEnvelope(conn *websocket.Conn, frameType, deviceID string, counter uint64, payload []byte) error {
@@ -681,6 +729,7 @@ type Tunnel struct {
 	Origin     string
 	Credential DeviceCredential
 	PrivateKey ed25519.PrivateKey
+	Metadata   AgentMetadata
 	Dialer     *websocket.Dialer
 	Policy     BackoffPolicy
 }
@@ -731,7 +780,7 @@ func (t *Tunnel) handshake(ctx context.Context, conn *websocket.Conn) error {
 	if _, err := rand.Read(agentNonce); err != nil {
 		return err
 	}
-	hello, _ := json.Marshal(helloPayload{DeviceID: t.Credential.DeviceID, Token: t.Credential.Token, Origin: t.Origin, Nonce: agentNonce})
+	hello, _ := json.Marshal(helloPayload{DeviceID: t.Credential.DeviceID, Token: t.Credential.Token, Origin: t.Origin, Nonce: agentNonce, Metadata: t.Metadata})
 	if err := writeEnvelope(conn, FrameHello, t.Credential.DeviceID, 1, hello); err != nil {
 		return err
 	}

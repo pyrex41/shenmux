@@ -94,6 +94,22 @@ short-lived capability from `/capabilities`, and attach over `/browser`; the
 controller routes session frames to the enrolled agent. `shenmux web` remains
 the local-only gateway for the existing PTY/ZeroMQ path.
 
+### Kubernetes agents and orchestrators
+
+Kubernetes workloads can run `shenmux agent` as a sidecar next to a Codex,
+Claude Code, Pi, or orchestration process. The agent advertises cluster,
+namespace, workload, pod, node, harness, and session metadata during the
+authenticated handshake. The controller exposes metadata-only discovery at
+`GET /sessions`, so a client can list available pods, orchestrators, and
+harness sessions before requesting a capability and attaching to `/browser`.
+
+The agent supports first-start enrollment with a short-lived
+`SHENMUX_ENROLLMENT_CODE`, making it suitable for Jobs, Deployments, and
+operator-created pods. Apply the example controller and sidecar assets in
+[`deploy/kubernetes`](deploy/kubernetes/), replace the example hostname/image,
+and put the controller behind an Ingress with TLS. Agents need only outbound
+HTTPS; they do not need a Service or inbound port.
+
 ## Build
 
 Requirements:

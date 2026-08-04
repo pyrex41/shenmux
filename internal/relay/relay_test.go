@@ -171,10 +171,27 @@ func TestAuthenticatedTunnelEnrollmentAndHandshake(t *testing.T) {
 	}
 	wsURL, _ := url.Parse(httpServer.URL)
 	wsURL.Scheme = "ws"
-	tunnel := Tunnel{URL: wsURL.String() + "/ws", Origin: "test-controller", Credential: cred, PrivateKey: priv, Policy: BackoffPolicy{Initial: time.Millisecond, Maximum: time.Millisecond}}
+	tunnel := Tunnel{URL: wsURL.String() + "/ws", Origin: "test-controller", Credential: cred, PrivateKey: priv, Metadata: AgentMetadata{Cluster: "dev", Namespace: "agents", Workload: "codex", Pod: "codex-0", Harness: "codex", Sessions: []SessionDescriptor{{ID: "shell", Name: "shell", Kind: "harness", Interactive: true}}}, Policy: BackoffPolicy{Initial: time.Millisecond, Maximum: time.Millisecond}}
 	conn, err := tunnel.Connect(context.Background())
 	if err != nil {
 		t.Fatal(err)
+	}
+	request, _ := http.NewRequest(http.MethodGet, httpServer.URL+"/sessions?namespace=agents", nil)
+	request.Header.Set("X-Shenmux-Subject", "alice")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("session discovery status %d", response.StatusCode)
+	}
+	var discovered []DiscoveredSession
+	if err := json.NewDecoder(response.Body).Decode(&discovered); err != nil {
+		t.Fatal(err)
+	}
+	if len(discovered) != 1 || discovered[0].Session.ID != "shell" || discovered[0].Metadata.Pod != "codex-0" {
+		t.Fatalf("discovered sessions = %+v", discovered)
 	}
 	conn.Close()
 	// Enrollment codes are atomically single-use.

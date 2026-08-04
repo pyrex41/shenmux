@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	agentbridge "github.com/pyrex41/shenmux/internal/agent"
 	"github.com/pyrex41/shenmux/internal/appstate"
 	"github.com/pyrex41/shenmux/internal/naming"
 	"github.com/pyrex41/shenmux/internal/relay"
@@ -87,7 +88,7 @@ Commands:
   run          run a local PTY session (no account or network required)
   login        select a controller for enrollment
 	  agent        run the outbound agent with relay/tailnet transport
-  controller   run a self-hosted controller (reserved until controller lands)
+	controller   run a self-hosted controller
   status       show local configuration and session inventory
   web          serve the local browser gateway
   version      print build version information
@@ -489,12 +490,24 @@ func runReserved(name string, args []string, stderr io.Writer) error {
 func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 	flags := newFlags("shenmux agent", stderr)
 	controller := flags.String("controller", os.Getenv("SHENMUX_CONTROLLER"), "controller URL")
+	enrollmentCode := flags.String("enrollment-code", os.Getenv("SHENMUX_ENROLLMENT_CODE"), "single-use enrollment code for first startup")
 	stateDir := flags.String("state-dir", "", "persistent state directory")
+	controlEndpoint := flags.String("control", "", "local muxd control endpoint (for sidecar attachment)")
+	dataEndpoint := flags.String("data", "", "local muxd data endpoint (for sidecar attachment)")
 	transportMode := flags.String("transport", os.Getenv("SHENMUX_TRANSPORT"), "transport path (auto, relay, tailscale)")
 	directEndpoint := flags.String("direct", os.Getenv("SHENMUX_DIRECT_ENDPOINT"), "direct Tailscale/WireGuard WebSocket endpoint")
 	tailscalePeer := flags.String("tailscale-peer", os.Getenv("SHENMUX_TAILSCALE_PEER"), "Tailscale peer hostname/IP/ID to discover")
 	tailscalePort := flags.Int("tailscale-port", 8788, "Tailscale peer WebSocket port")
 	requireDirect := flags.Bool("tailscale-require-direct", false, "fail instead of using DERP/peer-relay when selecting Tailscale")
+	cluster := flags.String("cluster", os.Getenv("SHENMUX_CLUSTER"), "Kubernetes cluster identity")
+	namespace := flags.String("namespace", firstEnv("SHENMUX_NAMESPACE", "POD_NAMESPACE"), "Kubernetes namespace")
+	workload := flags.String("workload", os.Getenv("SHENMUX_WORKLOAD"), "Kubernetes workload name")
+	pod := flags.String("pod", firstEnv("SHENMUX_POD", "POD_NAME"), "Kubernetes pod name")
+	node := flags.String("node", firstEnv("SHENMUX_NODE", "NODE_NAME"), "Kubernetes node name")
+	harness := flags.String("harness", os.Getenv("SHENMUX_HARNESS"), "agent harness name (codex, claude, pi, or custom)")
+	orchestrator := flags.Bool("orchestrator", false, "mark this agent as an orchestrator")
+	session := flags.String("session", os.Getenv("SHENMUX_SESSION"), "discoverable PTY/harness session name")
+	sessions := flags.String("sessions", os.Getenv("SHENMUX_SESSIONS"), "comma-separated discoverable session names")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -580,8 +593,34 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if state.DeviceID == "" && *enrollmentCode != "" {
+		if err := enrollDevice(*controller, *enrollmentCode, &state); err != nil {
+			return err
+		}
+		if err := paths.SaveState(state); err != nil {
+			return err
+		}
+	}
 	if state.DeviceID == "" || len(state.DevicePrivateKey) != ed25519.PrivateKeySize || len(state.DeviceToken) == 0 {
 		return errors.New("agent is not enrolled; run shenmux login --controller URL --code CODE")
+	}
+	metadata := relay.AgentMetadata{Cluster: *cluster, Namespace: *namespace, Workload: *workload, Pod: *pod, Node: *node, Harness: *harness, Orchestrator: *orchestrator}
+	kind := "harness"
+	if *orchestrator {
+		kind = "orchestrator"
+	}
+	sessionNames := []string{}
+	if *session != "" {
+		sessionNames = append(sessionNames, *session)
+	}
+	for _, name := range strings.Split(*sessions, ",") {
+		name = strings.TrimSpace(name)
+		if name != "" && !contains(sessionNames, name) {
+			sessionNames = append(sessionNames, name)
+		}
+	}
+	for _, name := range sessionNames {
+		metadata.Sessions = append(metadata.Sessions, relay.SessionDescriptor{ID: name, Name: name, Kind: kind, Harness: *harness, Interactive: true})
 	}
 	wsURL, err := controllerWebSocketURL(*controller)
 	if err != nil {
@@ -601,6 +640,7 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 	}
 	tunnel := &relay.Tunnel{URL: wsURL, Endpoints: endpoints, Origin: *controller,
 		Credential: relay.DeviceCredential{DeviceID: state.DeviceID, Token: state.DeviceToken, ExpiresAt: expires},
+		Metadata:   metadata,
 		PrivateKey: ed25519.PrivateKey(state.DevicePrivateKey),
 		Policy:     relay.BackoffPolicy{Initial: time.Second, Maximum: time.Minute, Factor: 2, Jitter: .2}}
 	log.New(stderr, "", 0).Printf("shenmux agent device=%s controller=%s transport=%s direct=%s", state.DeviceID, *controller, *transportMode, *directEndpoint)
@@ -610,19 +650,39 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 		if saveErr := paths.SaveState(state); saveErr != nil {
 			return saveErr
 		}
-		for {
-			if ctx.Err() != nil {
-				return ctx.Err()
+		bridge := agentbridge.NewBridge(state.DeviceID, func(session string) (string, string, error) {
+			if *controlEndpoint != "" || *dataEndpoint != "" {
+				if *controlEndpoint == "" || *dataEndpoint == "" {
+					return "", "", errors.New("--control and --data must be provided together")
+				}
+				return *controlEndpoint, *dataEndpoint, nil
 			}
-			if _, _, readErr := conn.ReadMessage(); readErr != nil {
-				return readErr
-			}
-		}
+			return naming.DefaultEndpoints(session)
+		})
+		return bridge.Serve(ctx, conn)
 	})
 	if errors.Is(err, context.Canceled) {
 		return nil
 	}
 	return err
+}
+
+func firstEnv(names ...string) string {
+	for _, name := range names {
+		if value := os.Getenv(name); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func contains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func runController(ctx context.Context, args []string, stderr io.Writer) error {
