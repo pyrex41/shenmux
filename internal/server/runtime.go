@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pyrex41/shenmux/internal/history"
 	"github.com/pyrex41/shenmux/internal/naming"
 	"github.com/pyrex41/shenmux/internal/protocol"
 	"github.com/pyrex41/shenmux/internal/screen"
@@ -28,12 +29,15 @@ type PTY interface {
 type Publisher interface{ Publish(protocol.Message) error }
 
 type RuntimeConfig struct {
-	Session      string
-	Dimensions   shenguard.Dimensions
-	PTY          PTY
-	Terminal     term.Terminal
-	Publisher    Publisher
-	StoreLimits  protocol.StoreLimits
+	Session     string
+	Dimensions  shenguard.Dimensions
+	PTY         PTY
+	Terminal    term.Terminal
+	Publisher   Publisher
+	StoreLimits protocol.StoreLimits
+	// HistoryDir enables crash-safe session checkpoints. Empty disables disk
+	// persistence for embedders that only need an in-memory runtime.
+	HistoryDir   string
 	ControlLease time.Duration
 }
 
@@ -51,6 +55,7 @@ type Runtime struct {
 
 	lastSeen     map[shenguard.ClientID]time.Time
 	controlLease time.Duration
+	historyDir   string
 	exitCode     int
 	closed       bool
 	closeOnce    sync.Once
@@ -103,12 +108,24 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 		_ = writer.Close()
 		return nil, err
 	}
-	return &Runtime{
+	runtime := &Runtime{
 		session: cfg.Session, model: model, pty: cfg.PTY, writer: writer,
 		term: cfg.Terminal, state: state, store: store, events: events,
-		lastSeen: make(map[shenguard.ClientID]time.Time), controlLease: cfg.ControlLease,
+		lastSeen: make(map[shenguard.ClientID]time.Time), controlLease: cfg.ControlLease, historyDir: cfg.HistoryDir,
 		fatal: make(chan error, 1),
-	}, nil
+	}
+	if err := runtime.persistHistory(); err != nil {
+		_ = runtime.Close()
+		return nil, fmt.Errorf("persist initial session history: %w", err)
+	}
+	return runtime, nil
+}
+
+func (r *Runtime) persistHistory() error {
+	if r.historyDir == "" {
+		return nil
+	}
+	return history.Save(r.historyDir, r.session, r.store.Snapshot())
 }
 
 func (r *Runtime) Close() error {
@@ -417,6 +434,9 @@ func (r *Runtime) Resize(cid shenguard.ClientID, dim shenguard.Dimensions) error
 	if err := r.store.Append(event, checkpoint); err != nil {
 		return r.failLocked(err)
 	}
+	if err := r.persistHistory(); err != nil {
+		return r.failLocked(fmt.Errorf("persist session history: %w", err))
+	}
 	r.model, r.state = nextModel, nextState
 	return r.enqueueCommittedLocked(msg)
 }
@@ -478,6 +498,9 @@ func (r *Runtime) HandlePTYOutput(payload []byte) error {
 	checkpoint := checkpointFor(nextModel, nextState, r.exitCode)
 	if err := r.store.Append(event, checkpoint); err != nil {
 		return err
+	}
+	if err := r.persistHistory(); err != nil {
+		return fmt.Errorf("persist session history: %w", err)
 	}
 	r.model, r.state = nextModel, nextState
 	return r.enqueueCommittedLocked(msg)
@@ -615,6 +638,9 @@ func (r *Runtime) HandleExit(exitCode int) error {
 	if err := r.store.Append(event, checkpoint); err != nil {
 		return err
 	}
+	if err := r.persistHistory(); err != nil {
+		return fmt.Errorf("persist session history: %w", err)
+	}
 	r.model, r.exitCode = nextModel, exitCode
 	msg := protocol.Message{Kind: protocol.KindExit, Meta: protocol.Meta{Version: protocol.Version, Session: r.session, Seq: seq.Uint64(), ExitCode: exitCode, ControlOwner: ownerString(nextModel)}}
 	return r.enqueueCommittedLocked(msg)
@@ -633,6 +659,9 @@ func (r *Runtime) controlMessageFromResultLocked(result shenguard.Result) (proto
 	checkpoint := checkpointFor(result.State, r.state, r.exitCode)
 	if err := r.store.Append(event, checkpoint); err != nil {
 		return protocol.Message{}, err
+	}
+	if err := r.persistHistory(); err != nil {
+		return protocol.Message{}, fmt.Errorf("persist session history: %w", err)
 	}
 	return protocol.Message{Kind: protocol.KindControl, Meta: protocol.Meta{Version: protocol.Version, Session: r.session, Seq: pub.Seq.Uint64(), ControlOwner: owner}}, nil
 }

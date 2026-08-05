@@ -115,6 +115,7 @@ func runLocal(ctx context.Context, args []string, _ io.Writer, stderr io.Writer)
 	keepalive := flags.Bool("keepalive", true, "restart the default login shell after it exits")
 	grace := flags.Duration("exit-grace", 150*time.Millisecond, "time to leave sockets open after command exit")
 	stateDir := flags.String("state-dir", "", "persistent state directory")
+	historyDir := flags.String("history-dir", "", "durable session history directory (defaults under state-dir)")
 	flags.Usage = func() {
 		fmt.Fprintln(flags.Output(), "usage: shenmux run [flags] [-- command [args...]]")
 		flags.PrintDefaults()
@@ -166,6 +167,13 @@ func runLocal(ctx context.Context, args []string, _ io.Writer, stderr io.Writer)
 			return fmt.Errorf("resolve state directory: %w", err)
 		}
 	}
+	if *historyDir == "" {
+		*historyDir = filepath.Join(paths.StateDir, "history")
+	} else if resolved, resolveErr := filepath.Abs(*historyDir); resolveErr != nil {
+		return fmt.Errorf("resolve history directory: %w", resolveErr)
+	} else {
+		*historyDir = resolved
+	}
 	if err := recordSession(paths, *session, nil); err != nil {
 		return err
 	}
@@ -179,7 +187,7 @@ func runLocal(ctx context.Context, args []string, _ io.Writer, stderr io.Writer)
 	logger.Printf("shenmux session=%s control=%s data=%s command=%q", *session, *control, *data, command)
 	return server.Serve(ctx, server.Config{
 		Session: *session, ControlEndpoint: *control, DataEndpoint: *data,
-		Dimensions: dimensions, Command: command, Env: os.Environ(), ExitGrace: *grace,
+		Dimensions: dimensions, Command: command, Env: os.Environ(), ExitGrace: *grace, HistoryDir: *historyDir,
 	})
 }
 
