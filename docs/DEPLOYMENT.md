@@ -154,7 +154,9 @@ example does not currently pass its mounted `/var/lib/shenmux` as
 Fly.io, EC2, Hetzner, a home server, and Kubernetes can all host the same
 future controller/agent architecture, but this repository does not claim a
 tested end-to-end deployment for any of them. `make test-deploy` currently
-checks no-Cgo compilation only.
+checks CGO-disabled compilation only. The default runtime has no libzmq or C
+toolchain dependency; only the optional Ghostty adapter needs CGO and external
+headers/library files.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for process boundaries and
 [TRUST-MODEL.md](TRUST-MODEL.md) before exposing any interface.

@@ -18,6 +18,7 @@ type controlResult struct {
 type controlRequest struct {
 	msg   protocol.Message
 	wait  bool
+	ctx   context.Context
 	reply chan controlResult
 }
 
@@ -33,7 +34,7 @@ func newControlActor(ctx context.Context, socket *zmqx.Socket, errorsOut chan<- 
 }
 
 func (a *controlActor) Call(ctx context.Context, msg protocol.Message) (protocol.Message, error) {
-	req := controlRequest{msg: msg, wait: true, reply: make(chan controlResult, 1)}
+	req := controlRequest{msg: msg, wait: true, ctx: ctx, reply: make(chan controlResult, 1)}
 	select {
 	case a.requests <- req:
 	case <-ctx.Done():
@@ -52,7 +53,7 @@ func (a *controlActor) Call(ctx context.Context, msg protocol.Message) (protocol
 }
 
 func (a *controlActor) Send(ctx context.Context, msg protocol.Message) error {
-	req := controlRequest{msg: msg, reply: make(chan controlResult, 1)}
+	req := controlRequest{msg: msg, ctx: ctx, reply: make(chan controlResult, 1)}
 	select {
 	case a.requests <- req:
 	case <-ctx.Done():
@@ -125,7 +126,7 @@ func (a *controlActor) run(ctx context.Context, socket *zmqx.Socket, errorsOut c
 			}
 			frames, err := protocol.Encode(req.msg)
 			if err == nil {
-				err = socket.SendMultipart(frames, 0)
+				err = socket.SendMultipartContext(req.ctx, frames, 0)
 			}
 			if err != nil {
 				if req.wait {

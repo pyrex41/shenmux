@@ -23,7 +23,7 @@ current behavior and must not weaken the single-PTY-writer contract.
 
 | Area | Implemented now | Important limit |
 | --- | --- | --- |
-| Local session | PTY, Shen-authorized commands, canonical screen, bounded checkpoint/tail, ordered deltas, control ownership, resync | Memory-only; Linux/macOS Cgo runtime |
+| Local session | PTY, Shen-authorized commands, canonical screen, bounded checkpoint/tail, ordered deltas, control ownership, resync | Memory-only; Linux/macOS pure-Go runtime |
 | Local clients | `muxctl` and a PixiJS browser gateway | Gateway has no authentication |
 | Command surface | `run`, `web`, `login`, `agent`, `controller`, `status`, `version`; legacy commands retained | No install/uninstall or admin commands |
 | Agent identity | Single-use enrollment code, Ed25519 device key/proof, persisted credential | No automatic credential rotation/recovery |
@@ -43,7 +43,7 @@ claiming a hosted service.
 Remaining work:
 
 1. Package the `shenmux`, `muxctl`, and browser assets for supported Linux and
-   macOS targets, including libzmq dependency checks.
+   macOS targets, including Go 1.26 and Unix socket-path checks.
 2. Add install/uninstall and service guidance that matches the actual state and
    IPC paths.
 3. Define session lifecycle accurately: live process probing, stale metadata
@@ -133,7 +133,7 @@ make test-deploy
 
 `make check` is the main implementation gate. `make test-relay` runs focused
 relay, policy, state, transport, update, and command tests. Despite its name,
-`make test-deploy` currently performs no-Cgo command builds only.
+`make test-deploy` currently performs CGO-disabled command builds only.
 
 Future integration coverage should include enrollment expiry and reuse denial,
 agent challenge failure, capability and control denial, revocation of live

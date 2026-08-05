@@ -112,8 +112,8 @@ The mux-specific trusted computing base includes:
 - `specs/mux.shen`, the generator, template, and generated guard boundary;
 - reducer/effect contract and trace tests;
 - the Go effect executor and runtime;
-- protocol, relay, policy, PTY, terminal, and ZeroMQ adapters;
-- Go, the operating system, libzmq, and optional libghostty-vt.
+- protocol, relay, policy, PTY, terminal, and ZMTP adapters;
+- Go, the operating system, and optional libghostty-vt.
 
 Generated types make guarded IDs, dimensions, and sequence values hard to
 construct incorrectly, and the audit gate prevents raw session literals

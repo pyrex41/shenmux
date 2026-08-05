@@ -23,12 +23,12 @@
             git
             gnumake
             nodejs
-            pkg-config
-            zeromq
           ];
 
           shellHook = ''
-            export CGO_ENABLED=1
+            # The default runtime is pure Go. Set CGO_ENABLED=1 explicitly
+            # only when building the optional libghostty adapter.
+            export CGO_ENABLED=0
             # Keep Unix-domain socket paths short on macOS, whose path limit
             # is easy to hit with Nix's generated temporary directory names.
             export TMPDIR=/tmp
