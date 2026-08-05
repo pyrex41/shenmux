@@ -93,6 +93,43 @@ func TestPersistentEnrollmentStoreSurvivesRestart(t *testing.T) {
 	}
 }
 
+func TestPersistentDeviceCredentialExpiryIsEnforced(t *testing.T) {
+	path := t.TempDir() + "/enrollment.json"
+	store, err := NewPersistentEnrollmentStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, err := store.Create(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, _, err := GenerateDeviceKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential, err := store.Consume(code, pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	record := store.devices[credential.DeviceID]
+	record.expires = time.Now().Add(-time.Second)
+	store.devices[credential.DeviceID] = record
+	if err := store.persistLocked(); err != nil {
+		store.mu.Unlock()
+		t.Fatal(err)
+	}
+	store.mu.Unlock()
+
+	reopened, err := NewPersistentEnrollmentStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reopened.authenticate(credential.DeviceID, credential.Token); ok {
+		t.Fatal("expired persisted device credential authenticated")
+	}
+}
+
 func TestEnvelopeRejectsMalformedAndOversizedHeaders(t *testing.T) {
 	if _, err := Decode([]byte{0, 0, 0}); err == nil {
 		t.Fatal("expected short envelope error")

@@ -1,3 +1,6 @@
+// Package transport discovers optional direct paths used by the authenticated
+// relay tunnel. The tunnel remains responsible for dialing, authentication,
+// fallback, and reconnect policy.
 package transport
 
 import (
@@ -107,78 +110,10 @@ type TailscaleResolver struct {
 	RequireDirect bool
 }
 
-// TailscaleDiscovery is the imperative discovery/health API used by callers
-// that already own reconnect and fallback policy. TailscaleResolver composes
-// the same operations behind EndpointResolver for ConnectResolved.
-type TailscaleDiscovery struct {
-	Runner      CommandRunner
-	Binary      string
-	Scheme      string
-	Port        int
-	Path        string
-	PingTimeout time.Duration
-}
-
-// Endpoint discovers a currently-online peer. It uses the stable Tailscale IP
-// when one is present, avoiding any dependency on MagicDNS at dial time.
-func (d TailscaleDiscovery) Endpoint(ctx context.Context, peerName string) (Endpoint, error) {
-	runner, binary := d.command()
-	output, err := runner.Run(ctx, binary, "status", "--json")
-	if err != nil {
-		return Endpoint{}, commandError("tailscale status", output, err)
-	}
-	peers, err := ParseTailscaleStatus(output)
-	if err != nil {
-		return Endpoint{}, err
-	}
-	peer, err := selectTailscalePeer(peers, peerName)
-	if err != nil {
-		return Endpoint{}, err
-	}
-	target := peerTargetIPFirst(peer)
-	if target == "" {
-		return Endpoint{}, fmt.Errorf("tailscale peer %q has no IP or DNS name", peerName)
-	}
-	resolver := TailscaleResolver{Scheme: d.Scheme, Port: d.Port, Path: d.Path}
-	endpointURL, err := resolver.endpointURL(target)
-	if err != nil {
-		return Endpoint{}, err
-	}
-	return Endpoint{Kind: KindDirect, URL: endpointURL}, nil
-}
-
-// Healthy verifies encrypted end-to-end reachability through the tailnet.
-// It intentionally permits either a direct UDP path or Tailscale's encrypted
-// DERP/peer-relay path; use TailscaleResolver.RequireDirect when only a
-// peer-to-peer path should be preferred over the shenmux relay.
-func (d TailscaleDiscovery) Healthy(ctx context.Context, peerName string) error {
-	runner, binary := d.command()
-	timeout := d.PingTimeout
-	if timeout <= 0 {
-		timeout = 3 * time.Second
-	}
-	output, err := runner.Run(ctx, binary, "ping", "--timeout="+timeout.String(), "--tsmp", "--c=1", peerName)
-	if err != nil {
-		return commandError("tailscale ping", output, err)
-	}
-	return nil
-}
-
-func (d TailscaleDiscovery) command() (CommandRunner, string) {
-	runner := d.Runner
-	if runner == nil {
-		runner = ExecRunner{}
-	}
-	binary := d.Binary
-	if binary == "" {
-		binary = "tailscale"
-	}
-	return runner, binary
-}
-
-// Resolve implements EndpointResolver. A successful result is directly
-// consumable by WebSocketDialer and ConnectResolved.
-func (r TailscaleResolver) Resolve(ctx context.Context) ([]Endpoint, error) {
+// Resolve returns the WebSocket URL for an online peer after checking tailnet
+// reachability. The caller decides whether failure is fatal or should fall
+// back to the relay.
+func (r TailscaleResolver) Resolve(ctx context.Context) (string, error) {
 	runner := r.Runner
 	if runner == nil {
 		runner = ExecRunner{}
@@ -189,23 +124,23 @@ func (r TailscaleResolver) Resolve(ctx context.Context) ([]Endpoint, error) {
 	}
 	output, err := runner.Run(ctx, binary, "status", "--json")
 	if err != nil {
-		return nil, commandError("tailscale status", output, err)
+		return "", commandError("tailscale status", output, err)
 	}
 	peers, err := ParseTailscaleStatus(output)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	peer, err := selectTailscalePeer(peers, r.Peer)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	target := peerTarget(peer)
 	if target == "" {
-		return nil, fmt.Errorf("tailscale peer %q has no DNS name or IP", r.Peer)
+		return "", fmt.Errorf("tailscale peer %q has no DNS name or IP", r.Peer)
 	}
 	if !r.SkipPing {
 		if err := r.ping(ctx, runner, binary, target); err != nil {
-			return nil, err
+			return "", err
 		}
 	}
 	// The peer listener is HTTP by default because the tailnet already
@@ -217,9 +152,9 @@ func (r TailscaleResolver) Resolve(ctx context.Context) ([]Endpoint, error) {
 	}
 	endpointURL, err := endpointConfig.endpointURL(target)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	return []Endpoint{{Kind: KindDirect, URL: endpointURL}}, nil
+	return endpointURL, nil
 }
 
 func (r TailscaleResolver) ping(ctx context.Context, runner CommandRunner, binary, target string) error {
@@ -313,15 +248,6 @@ func peerTarget(peer TailscalePeer) string {
 		}
 	}
 	return ""
-}
-
-func peerTargetIPFirst(peer TailscalePeer) string {
-	for _, address := range peer.TailscaleIPs {
-		if net.ParseIP(address) != nil {
-			return address
-		}
-	}
-	return peer.DNSName
 }
 
 func pingReportsDirect(output []byte) bool {

@@ -3,15 +3,10 @@ package transport
 import (
 	"context"
 	"errors"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 type runnerResponse struct {
@@ -70,13 +65,13 @@ func TestTailscaleResolverDiscoversAndChecksPeer(t *testing.T) {
 		Runner: runner, Peer: "id-1", Port: 9443, Path: "/shenmux/ws",
 		PingTimeout: 1500 * time.Millisecond,
 	}
-	endpoints, err := resolver.Resolve(context.Background())
+	endpoint, err := resolver.Resolve(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []Endpoint{{Kind: KindDirect, URL: "ws://agent.tail.example:9443/shenmux/ws"}}
-	if !reflect.DeepEqual(endpoints, want) {
-		t.Fatalf("endpoints = %+v, want %+v", endpoints, want)
+	want := "ws://agent.tail.example:9443/shenmux/ws"
+	if endpoint != want {
+		t.Fatalf("endpoint = %q, want %q", endpoint, want)
 	}
 	wantCalls := [][]string{
 		{"tailscale", "status", "--json"},
@@ -103,58 +98,11 @@ func TestTailscaleResolverRequiresActualDirectPath(t *testing.T) {
 
 func TestTailscaleResolverIPv6Endpoint(t *testing.T) {
 	runner := &recordingRunner{responses: []runnerResponse{{output: []byte(`{"BackendState":"Running","Peer":{"nodekey:k":{"HostName":"v6","TailscaleIPs":["fd7a:115c:a1e0::8"],"Online":true}}}`)}}}
-	endpoints, err := (TailscaleResolver{Runner: runner, Peer: "v6", Scheme: "ws", Port: 8080, SkipPing: true}).Resolve(context.Background())
+	endpoint, err := (TailscaleResolver{Runner: runner, Peer: "v6", Scheme: "ws", Port: 8080, SkipPing: true}).Resolve(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := endpoints[0].URL, "ws://[fd7a:115c:a1e0::8]:8080/ws"; got != want {
+	if got, want := endpoint, "ws://[fd7a:115c:a1e0::8]:8080/ws"; got != want {
 		t.Fatalf("URL = %q, want %q", got, want)
-	}
-}
-
-func TestConnectResolvedFallsBackWhenTailscaleUnavailable(t *testing.T) {
-	runner := &recordingRunner{responses: []runnerResponse{{output: []byte("tailscaled is not running"), err: errors.New("exit 1")}}}
-	relay := Endpoint{Kind: KindRelay, URL: "wss://relay.example/ws"}
-	session, endpoint, err := ConnectResolved(context.Background(), fakeDialer{}, Selector{}, TailscaleResolver{Runner: runner, Peer: "agent"}, relay)
-	if err != nil || session == nil || endpoint != relay {
-		t.Fatalf("connect = %v, %+v, %v", session, endpoint, err)
-	}
-}
-
-func TestTailscaleResolvedEndpointUsesWebSocketDialer(t *testing.T) {
-	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		_, payload, err := conn.ReadMessage()
-		if err == nil {
-			_ = conn.WriteMessage(websocket.BinaryMessage, payload)
-		}
-	}))
-	defer server.Close()
-
-	var port int
-	if _, err := fmt.Sscanf(server.URL, "http://127.0.0.1:%d", &port); err != nil {
-		t.Fatal(err)
-	}
-	runner := &recordingRunner{responses: []runnerResponse{{output: []byte(`{"BackendState":"Running","Peer":{"nodekey:k":{"HostName":"agent","TailscaleIPs":["127.0.0.1"],"Online":true}}}`)}}}
-	resolver := TailscaleResolver{Runner: runner, Peer: "agent", Scheme: "ws", Port: port, SkipPing: true}
-	session, endpoint, err := ConnectResolved(context.Background(), WebSocketDialer{Timeout: time.Second}, Selector{}, resolver)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer session.Close()
-	if endpoint.Kind != KindDirect {
-		t.Fatalf("endpoint = %+v", endpoint)
-	}
-	if err := session.Send(context.Background(), []byte("over-wireguard")); err != nil {
-		t.Fatal(err)
-	}
-	payload, err := session.Recv(context.Background())
-	if err != nil || string(payload) != "over-wireguard" {
-		t.Fatalf("recv = %q, %v", payload, err)
 	}
 }

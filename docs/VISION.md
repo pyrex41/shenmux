@@ -1,5 +1,12 @@
 # shenmux vision
 
+## Status
+
+This is a north-star product document, not a description of the current
+repository. The implemented local and development-controller paths are
+documented in the [README](../README.md); production gaps and release gates are
+tracked in [V1/V2-PLAN.md](V1-V2-PLAN.md).
+
 ## The product
 
 shenmux is a durable, identity-aware work surface for terminals, coding

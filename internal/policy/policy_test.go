@@ -120,6 +120,47 @@ func TestAuthenticateCapabilityReturnsCanonicalBinding(t *testing.T) {
 	}
 }
 
+func TestCapabilityRedemptionSurvivesRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.json")
+	s, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddGrant("alice", "agent-1", "shell", []Permission{PermissionObserve}, nil); err != nil {
+		t.Fatal(err)
+	}
+	capability, err := s.IssueCapability("alice", "agent-1", "shell", PermissionObserve, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RedeemCapability(capability.ID, capability.Token, PermissionObserve, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reopened.RedeemCapability(capability.ID, capability.Token, PermissionObserve, time.Now()); err == nil {
+		t.Fatal("redeemed capability became reusable after restart")
+	}
+	if _, err := reopened.AuthenticateCapability(capability.ID, capability.Token, PermissionObserve, time.Now()); err != nil {
+		t.Fatalf("redemption incorrectly revoked an active stream: %v", err)
+	}
+}
+
+func TestPersistenceFailureRollsBackMutation(t *testing.T) {
+	s := NewMemory()
+	// Renaming a temporary file over an existing directory fails after the
+	// in-memory mutation, exercising rollback without test-only hooks.
+	s.path = t.TempDir()
+	if _, err := s.AddGrant("alice", "agent-1", "shell", []Permission{PermissionObserve}, nil); err == nil {
+		t.Fatal("expected persistence failure")
+	}
+	if len(s.state.Grants) != 0 {
+		t.Fatalf("failed persistence left %d in-memory grants", len(s.state.Grants))
+	}
+}
+
 func TestAuditMetadata(t *testing.T) {
 	s := NewMemory()
 	if err := s.Audit(AuditEvent{Actor: "alice", Session: "s", Action: "attach", Outcome: "allowed"}); err != nil {

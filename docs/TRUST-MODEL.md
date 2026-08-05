@@ -1,65 +1,138 @@
 # Trust model
 
-## Trusted computing base
+The practical trust boundary depends on which interface you use. This document
+separates controls present in the code from security a deployment must add.
 
-The structural trusted computing base is:
+## Local session
 
-- `specs/mux.shen`;
-- `cmd/shenmux-gen` and `codegen/guards_gen.go.tmpl`;
-- the generated Go-facing reducer/effect boundary after drift verification;
-- the reducer/effect contract tests that pin command, state, rejection, and effect semantics;
-- Go's type checker and runtime;
-- the small C ABI declarations in `internal/zmqx`, `internal/ptyx`, and optional `internal/term/ghostty.go`;
-- libzmq, the OS PTY implementation, and libghostty-vt when enabled.
+`shenmux run` trusts processes running as the same operating-system user.
+Default IPC sockets are placed in an owner-only directory, and advisory lock
+sentinels prevent a second daemon from unlinking live endpoints. Custom IPC
+parents are rejected unless they have the same ownership and permission shape.
 
-The mux-specific emitter is intentionally narrower than generic `shengen`. It checks for exactly one declaration of every required datatype and reducer transition form, hashes the full Shen source, and generates a closed Go boundary. A change outside the recognized shape fails regeneration instead of silently producing permissive code. The emitter and Shen test suite are complementary: generated code preserves the typed Go ABI, while the Shen reducer tests establish the legal transition and effect traces. The portable trace suite currently loads the annotated reducer under `tc -`; current Shen ports exhaust their inference budget on the heterogeneous session reducer under `tc +`. Neither gate is a formal proof of the Go effect executor or of arbitrary Shen programs.
+Inside that boundary, protocol decoders bound frame sizes and validate
+versions, kinds, client IDs, session names, dimensions, sequence numbers, and
+archives. The ROUTER identity is the effective client identity. The
+Shen-derived reducer authorizes attach, control ownership, input, resize,
+detach, and event sequencing before Go executes effects.
 
-## Structurally enforced
+This is local containment, not cryptographic authentication. Do not publish
+the ZeroMQ endpoints or make their directory available to other users. The
+local browser gateway also has no authentication and should remain bound to
+loopback.
 
-- Client IDs and dimensions cross host boundaries through validated constructors.
-- Sequence values are opaque and advance through `NextSeq`.
-- Session fields are private.
-- Attach, detach, snapshot lock, input authorization, event sequencing, rejection reasons, and effect selection go through the Shen reducer transition boundary.
-- Raw `Session` literals outside the generated reducer boundary fail the audit gate.
-- The wire decoder bounds frames and rejects unknown protocol versions and kinds.
-- Snapshot decoding validates exact sequence continuity and record shape.
+## Development controller identity
 
-## Runtime-checked assumptions
+Agent enrollment uses a random, single-use code that expires after ten
+minutes. The controller stores only its hash until it is consumed, then issues
+a device ID and random credential. The agent also creates an Ed25519 key pair
+and proves possession during each WebSocket challenge. Controller enrollment
+and policy files are written owner-only and atomically.
 
-- ROUTER identity is the client identity. Default filesystem IPC sockets are reachable only through a daemon-owned directory whose group/other permission bits are clear.
-- A daemon owns each filesystem endpoint only after acquiring its persistent `0600` advisory lock sentinel; stale socket removal occurs after the lock, so a competing process cannot unlink a live endpoint.
-- A client has subscribed before attach because XPUB observed `ready/<id>`.
-- Terminal, journal, and model mutations occur under the runtime mutex; PTY writes are handed to the single writer actor and execute outside that lock. A reducer result is committed only after required synchronous impure effects succeed.
-- Resize failures restore the PTY when possible; failures after terminal reflow close the runtime and emit a fatal consistency error rather than publishing an inconsistent state.
-- Each ZeroMQ socket has exactly one goroutine owner.
-- The libzmq 4.x ABI represents `zmq_msg_t` as the documented 64-byte opaque value.
-- The pinned libghostty-vt headers match the linked library when the build tag is enabled.
+This implementation has important limits:
 
-## Current prototype limitations
+- Device credentials have a 30-day expiry value, but automatic rotation and
+  re-enrollment operations are not implemented.
+- The controller command has no OIDC/OAuth/session integration. Its fallback
+  accepts `X-Shenmux-Subject`, and development mode can accept a matching
+  `?subject=` query parameter. Neither authenticates a public user by itself.
+- The WebSocket upgrader currently accepts any Origin. A production edge must
+  enforce origin policy.
+- The listener is plain HTTP. HTTPS/WSS requires a reverse proxy or other TLS
+  termination that is not configured by shenmux.
+- There is no command-line or web administrator workflow for grants,
+  revocation, audit review, credential rotation, or recovery.
 
-The local muxd/WebSocket prototype remains intentionally local-only. The
-authenticated controller path now has durable ACL/capability/lease/audit
-policy, optional direct/Tailscale transport, and an endpoint-integrated blind
-stream: the native blind-stream client helper performs the X25519/Ed25519
-handshake, the agent decrypts and validates inner frames, and all
-attached/delta/input payloads are encrypted before crossing the relay. The
-controller continues to see only routing metadata and ciphertext for blind
-streams. Owner-only local IPC containment is not a substitute for
-cryptographic identity; hosted deployments still need a real browser identity
-provider.
+Browser attach capabilities are random bearer values stored by the policy
+store. They are subject/device/session/permission bound, short lived (one
+minute by default), and accepted for only one new stream by the controller.
+Trusted-mode input and resize also require a control capability and a renewable
+controller lease. Revocation helpers and policy tests exist in the Go package,
+but the `shenmux controller` command does not expose an operations API for
+them.
 
-## Not claimed
+## Trusted relay mode
 
-- V1 trusted-server relay does not provide blind end-to-end confidentiality.
-- Blind relay confidentiality is a V2 claim scoped to an honest identity
-  provider, browser origin/client distribution, and endpoint keys. Key
-  exchange, downgrade, replay, recovery, and bridge integration are covered;
-  routing, timing, and size metadata still remain visible to the controller.
-- No durable delivery guarantee from PUB/SUB.
-- No proof of liveness or bounded memory for an indefinitely running session.
-- No full native terminal snapshot in the current Ghostty C API integration.
-- No guarantee that the basic metadata tracker emulates terminal cells; it does not.
-- No formal proof of the Go effect executor against the Shen reducer beyond the generated boundary, trace/contract tests, and runtime integration tests.
+Trusted mode is the default and is what the bundled controller workspace uses.
+The controller decodes inner session messages to enforce command type,
+capability permission, session binding, and control lease. Consequently, the
+controller can read terminal contents and input. HTTPS/WSS, when supplied by a
+deployment, protects only the network hops.
+
+Choose trusted mode only when the controller operator and its storage/runtime
+are allowed to see session data.
+
+## Blind relay mode
+
+The relay and agent packages implement an endpoint-side blind stream:
+
+- the client and enrolled agent bind device, session, stream, subject,
+  permission, and capability digest into the handshake;
+- X25519 supplies ephemeral agreement, the agent Ed25519 key authenticates the
+  transcript, HKDF derives keys, and AEAD protects inner frames;
+- counters and epochs protect nonce use and reject replay;
+- the controller forwards routing headers and ciphertext rather than decoded
+  terminal frames.
+
+The controller still sees device/session/stream routing, frame sizes, timing,
+and connection metadata. It still authenticates the browser identity, issues
+the capability, and distributes the agent public identity. The claim therefore
+assumes an honest identity provider and an authentic blind client. A controller
+that can replace browser code or substitute identities remains in a position
+to attack the session.
+
+Most importantly, the repository does not ship a browser or native executable
+that initiates this blind handshake. The primitives and integration tests are
+available to developers, but blind relay is not an end-user feature of the
+bundled workspace.
+
+Persisting `--trust-mode blind` sets the agent's minimum accepted stream mode.
+It rejects the bundled trusted workspace rather than silently downgrading.
+
+## State exposure
+
+Protect these files like credentials:
+
+- user config and agent state under the resolved XDG paths;
+- controller `enrollment.json` and `policy.json` under `--state-dir`.
+
+The agent state contains the device private key and bearer credential. The
+controller enrollment file contains device public keys and bearer credentials.
+The policy file contains grants, capabilities, leases, revocations, and audit
+metadata. Terminal payloads are not intentionally written to those files.
+
+Terminal checkpoints and deltas are memory-only in the current runtime. A
+process crash can still expose them through ordinary process/core-dump or host
+administrator access; blind mode does not protect compromised endpoints.
+
+## Implementation assurance
+
+The mux-specific trusted computing base includes:
+
+- `specs/mux.shen`, the generator, template, and generated guard boundary;
+- reducer/effect contract and trace tests;
+- the Go effect executor and runtime;
+- protocol, relay, policy, PTY, terminal, and ZeroMQ adapters;
+- Go, the operating system, libzmq, and optional libghostty-vt.
+
+Generated types make guarded IDs, dimensions, and sequence values hard to
+construct incorrectly, and the audit gate prevents raw session literals
+outside the reducer boundary. This is not a formal proof of the Go executor,
+the complete system, liveness, or bounded memory for an indefinitely running
+session.
+
+## Explicit non-claims
+
+- No public controller or browser authentication is supplied.
+- No confidentiality from the controller in trusted mode.
+- No end-user blind client is supplied.
+- No durable delivery guarantee from ZeroMQ PUB/SUB; gaps recover by resync.
+- No persistence of a live PTY or terminal checkpoint across daemon/host
+  restart.
+- No complete terminal-emulation compatibility guarantee.
+- No Windows PTY support.
+- No reviewed production datastore, rate-limiting layer, multi-node
+  coordination, or disaster-recovery implementation.
 
 ## Verification commands
 
@@ -74,14 +147,6 @@ go build ./...
 CGO_ENABLED=0 go build ./...
 ```
 
-`make check` runs `./scripts/shen-check.sh` as a required gate. It fails when
-neither Bifrost nor a configured Shen launcher is available. In CI, install the
-specific Shen implementation used by the project (or set `SHEN_BIN`) before
-running the gate; local development should use the same pinned environment.
-
-For the complete cross-implementation suite, also run:
-
-```sh
-make bifrost
-sb gates
-```
+`make check` includes the generated-code, audit, Shen, test, vet, web-build,
+and build gates. The Shen gate requires Bifrost or a configured `SHEN_BIN`.
+For the broader portable suite, also run `make bifrost` and `sb gates`.

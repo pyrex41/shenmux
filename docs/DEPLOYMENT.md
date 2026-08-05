@@ -1,75 +1,160 @@
-# Deployment contracts
+# Deployment status and requirements
 
-The agent is deliberately an egress-only service. It needs DNS and outbound
-TCP 443 to the controller; it does not expose ZeroMQ, SSH, or an HTTP port.
-Persist the state directory so the device key survives upgrades and reboots.
+There are three distinct ways to run shenmux. Only the local development path
+is packaged coherently in this repository today.
 
-## Local-only
+## 1. Local development
 
-Run `shenmux run` (or `muxd` for compatibility) and use `shenmux web` on the
-same host. No account, controller, or network access is required. The Unix
-control/data sockets must remain owner-only.
+Run the PTY daemon and browser gateway as the same operating-system user:
 
-## Hosted controller
-
-Run `shenmux agent --controller https://controller.example` on the host that
-owns the PTY. Enroll once with a short-lived code, then keep
-`/var/lib/shenmux` (or `$XDG_STATE_HOME/shenmux`) on durable storage. The
-browser connects only to the controller's HTTPS/WSS endpoint.
-
-Run the controller with `shenmux controller --state-dir
-/var/lib/shenmux-controller`. That directory contains the owner-only durable
-enrollment/device credential store and policy database; back it up together
-with its TLS and identity-provider configuration. Development controllers may
-use the default XDG state path, but production deployments should set the
-directory explicitly on a persistent volume.
-
-## Fly.io
-
-Use a Machine volume for `/var/lib/shenmux` and allow egress DNS/HTTPS. The
-agent needs no `[http_service]` or public listener:
-
-```toml
-app = "replace-me"
-primary_region = "ord"
-
-[build]
-  image = "ghcr.io/pyrex41/shenmux:latest"
-
-[mounts]
-  source = "shenmux_state"
-  destination = "/var/lib/shenmux"
-
-[processes]
-  agent = "shenmux agent --controller https://controller.example"
+```sh
+./bin/shenmux run --session work
+./bin/shenmux web --session work
 ```
 
-Create the volume in the target region and provide the enrollment code as a
-one-time secret. Do not publish the agent's control/data ports.
+No controller, account, or network access is required. Both processes use
+owner-only local IPC. Keep the gateway on its default loopback listener; it has
+no authentication.
 
-## AWS EC2
+This is the recommended way to evaluate the terminal runtime and browser UI.
 
-Attach an EBS volume at `/var/lib/shenmux`, install
-`deploy/systemd/shenmux-agent.service`, and set `SHENMUX_CONTROLLER` in an
-environment drop-in. The security group requires only outbound TCP 443 and
-DNS; no inbound rule is needed for the agent. Put the controller behind an
-HTTPS load balancer or use the hosted service.
+## 2. Self-hosted development controller
 
-## Hetzner
+The controller is a single plain-HTTP process suitable for an integration
+test or a private development network. It stores enrollment and policy JSON in
+one local directory.
 
-Mount a persistent Volume at `/var/lib/shenmux`, install the same systemd unit,
-and permit outbound 443/DNS in the firewall. NAT is supported. Keep the
-controller URL and enrollment code out of the unit file (use an environment
-file with mode 0600).
+```sh
+./bin/shenmux controller \
+  --listen 127.0.0.1:8788 \
+  --origin http://127.0.0.1:8788 \
+  --state-dir ./controller-state \
+  --dev-browser-subject local-test
+```
 
-## Home server
+On the agent host, run a session separately, enroll, and advertise that
+session:
 
-Install the binary and `deploy/systemd/shenmux-agent.service` (or a launchd
-equivalent on macOS), persist the state directory, and enroll from the
-controller. No port forwarding is required; the agent maintains the outbound
-WSS connection through NAT. Local Unix IPC remains available during a
-controller outage.
+```sh
+./bin/shenmux run --session work
 
-All deployments should expose the controller's `/healthz` endpoint and back up
-controller state. A reconnecting browser receives a fresh checkpoint followed
-by ordered deltas; it never relies on replaying an unbounded browser queue.
+./bin/shenmux login \
+  --controller http://127.0.0.1:8788 \
+  --code CODE_FROM_CONTROLLER
+
+./bin/shenmux agent \
+  --controller http://127.0.0.1:8788 \
+  --state-dir ./agent-state \
+  --transport relay \
+  --session work
+```
+
+The agent opens the connection outbound and does not need an inbound public
+port. It still needs local access to the session's ZeroMQ sockets. If `run` and
+`agent` use different users, containers, or filesystem namespaces, explicitly
+share a private IPC directory and pass matching `--control` and `--data`
+endpoints.
+
+The browser then opens
+`/workspace?subject=local-test`. The development subject grants wildcard
+observe/control access and must never be enabled on a public listener.
+
+### What survives restart
+
+- The agent state directory contains its device key, credential, session
+  metadata, and reconnect settings.
+- The controller state directory contains device/enrollment records and policy
+  records.
+- An agent or controller reconnect does not deliberately stop a separately
+  running local PTY.
+
+The PTY, checkpoint/tail, connected-agent inventory, and live streams are not
+persisted. Restarting `shenmux run` loses the terminal process. The bundled
+browser workspace also requires a refresh/re-attach after disconnection.
+
+## 3. Production controller
+
+The current command is not a production controller. Putting a TLS proxy in
+front of it solves only transport encryption. A deployable multi-user service
+still needs all of the following integrations and operating work:
+
+### Identity and authorization
+
+- an actual browser identity provider and session validation;
+- removal of client-supplied identity headers at the edge;
+- a strict Origin allowlist for HTTP and WebSocket requests;
+- administrator interfaces for grants, revocation, credential rotation, and
+  audit review;
+- CSRF and browser security policy appropriate to the chosen authentication
+  design.
+
+### Network and abuse controls
+
+- TLS configuration and renewal for HTTPS/WSS;
+- request, connection, frame, and enrollment rate limits;
+- edge body/time limits, logging, monitoring, and alerting;
+- a decision about trusted relay data exposure or a shipped blind-capable
+  client.
+
+### Data and availability
+
+- a reviewed store for concurrent controller instances, schema migrations,
+  backup/restore, and credential recovery;
+- coordination for capabilities, single-use enforcement, leases, revocation,
+  connected agents, and streams if more than one controller instance is used;
+- upgrade, rollback, health, readiness, and disaster-recovery procedures.
+
+The current `enrollment.json` and `policy.json` stores use owner-only atomic
+file replacement and are useful for one development process. They are not a
+SQLite/Postgres implementation and do not coordinate replicas.
+
+### Agent operations
+
+A production agent service would need to:
+
+- run under the same user/security context as the session daemon, or share
+  only the required private IPC directory;
+- set `SHENMUX_STATE_DIR` or pass `--state-dir` to durable storage;
+- enroll once without leaving the bootstrap code in a long-lived environment;
+- preserve the device state across upgrades and monitor credential expiry;
+- supervise `shenmux run` separately and define what should happen when its
+  shell or host exits.
+
+There is no PTY recovery across a daemon or host reboot. `--keepalive` restarts
+a shell only while the daemon itself remains running.
+
+## Transport deployment choices
+
+`relay` connects the agent to the controller URL. `auto` can try a configured
+direct controller address first and fall back to the controller URL.
+`tailscale` requires that direct address or resolves one with the local
+Tailscale CLI.
+
+The direct address must expose the same controller `/ws` handler. It is not an
+agent listener and does not remove controller authentication or routing. For a
+tailnet address, WireGuard supplies hop encryption; use `wss://` as well if
+your deployment requires TLS at the application endpoint.
+
+## Checked-in deployment assets
+
+Treat `deploy/` as design material, not an installable distribution.
+
+| Asset | Current reality |
+| --- | --- |
+| `Dockerfile` and root `fly.toml` | Legacy `muxd` image exposing ZeroMQ TCP internally; it does not contain the `shenmux` controller/agent binary |
+| `deploy/fly.toml.example` | Describes an egress-only agent shape but assumes a published image containing `shenmux`; that image is not built here |
+| `deploy/systemd/*.service` | Illustrative hardening baseline; environment/state/IPC ownership and enrollment must be completed for the target host |
+| `deploy/kubernetes/*.yaml` | Architecture fragments; they assume a compatible image, TLS/identity integration, writable durable state, and a separately running session daemon |
+
+In particular, the Kubernetes controller example sets a read-only root
+filesystem without mounting the controller state directory, and the sidecar
+example does not currently pass its mounted `/var/lib/shenmux` as
+`--state-dir`. Apply neither unchanged.
+
+Fly.io, EC2, Hetzner, a home server, and Kubernetes can all host the same
+future controller/agent architecture, but this repository does not claim a
+tested end-to-end deployment for any of them. `make test-deploy` currently
+checks no-Cgo compilation only.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for process boundaries and
+[TRUST-MODEL.md](TRUST-MODEL.md) before exposing any interface.
