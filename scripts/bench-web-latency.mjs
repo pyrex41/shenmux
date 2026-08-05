@@ -13,10 +13,12 @@ const value = (name, fallback) => {
 const url = value("--url", "ws://127.0.0.1:8789/ws");
 const count = Number(value("--count", "40"));
 const warmup = Number(value("--warmup", "5"));
+const simulatedRttMs = Number(value("--simulated-rtt-ms", "0"));
 
-if (!Number.isInteger(count) || count < 1 || !Number.isInteger(warmup) || warmup < 0) {
-  throw new Error("--count and --warmup must be non-negative integers (count >= 1)");
+if (!Number.isInteger(count) || count < 1 || !Number.isInteger(warmup) || warmup < 0 || !Number.isFinite(simulatedRttMs) || simulatedRttMs < 0) {
+  throw new Error("--count and --warmup must be non-negative integers (count >= 1); --simulated-rtt-ms must be non-negative");
 }
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const percentile = (values, p) => {
   const sorted = [...values].sort((a, b) => a - b);
@@ -60,8 +62,13 @@ const samples = [];
 for (let i = 0; i < warmup + count; i++) {
   const data = String.fromCharCode(0x61 + (i % 26));
   const sent = performance.now();
+  // This is an application-level controlled profile for hosts where tc/dnctl
+  // is unavailable. It delays each half of the measured path equally; use a
+  // real network emulator for wire-level measurements.
+  if (simulatedRttMs > 0) await sleep(simulatedRttMs / 2);
   socket.send(JSON.stringify({ type: "input", data }));
   await waitFor(socket, (message) => message.type === "delta" || message.type === "error");
+  if (simulatedRttMs > 0) await sleep(simulatedRttMs / 2);
   const elapsed = performance.now() - sent;
   if (i >= warmup) samples.push(elapsed);
 }
@@ -70,6 +77,7 @@ socket.close();
 const mean = samples.reduce((sum, value) => sum + value, 0) / samples.length;
 console.log(JSON.stringify({
   url,
+  simulated_rtt_ms: simulatedRttMs,
   samples: samples.length,
   min_ms: Math.min(...samples),
   p50_ms: percentile(samples, 50),

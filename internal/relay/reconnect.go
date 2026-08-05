@@ -73,6 +73,11 @@ func (p BackoffPolicy) Delay(attempt int) time.Duration {
 		if d < 0 {
 			d = 0
 		}
+		// Exponential delay is clamped before jitter; clamp again afterwards so
+		// jitter can never violate the policy's advertised maximum.
+		if d > float64(p.Maximum) {
+			d = float64(p.Maximum)
+		}
 	}
 	return time.Duration(d)
 }

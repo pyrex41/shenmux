@@ -4,12 +4,16 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -24,11 +28,26 @@ type deviceRecord struct {
 	token  []byte
 }
 
+type enrollmentDiskState struct {
+	Version  int                         `json:"version"`
+	Sequence uint64                      `json:"sequence"`
+	Enroll   map[string]time.Time        `json:"enroll"`
+	Devices  map[string]enrollmentDevice `json:"devices"`
+}
+
+type enrollmentDevice struct {
+	Public ed25519.PublicKey `json:"public"`
+	Token  []byte            `json:"token"`
+}
+
+const enrollmentSchemaVersion = 1
+
 // EnrollmentStore is a small in-memory store suitable for tests and a
 // development controller. Production controllers should replace it with a
 // durable implementation while retaining the atomic Consume semantics.
 type EnrollmentStore struct {
 	mu       sync.Mutex
+	path     string
 	enroll   map[[32]byte]enrollmentRecord
 	devices  map[string]deviceRecord
 	sequence uint64
@@ -36,6 +55,93 @@ type EnrollmentStore struct {
 
 func NewEnrollmentStore() *EnrollmentStore {
 	return &EnrollmentStore{enroll: make(map[[32]byte]enrollmentRecord), devices: make(map[string]deviceRecord)}
+}
+
+// NewPersistentEnrollmentStore keeps enrollment codes and device credentials
+// across controller restarts. The file is owner-readable only and writes are
+// atomic, so a restart cannot resurrect a consumed code or truncate state.
+func NewPersistentEnrollmentStore(path string) (*EnrollmentStore, error) {
+	if path == "" {
+		return nil, errors.New("enrollment state path is empty")
+	}
+	s := &EnrollmentStore{path: path, enroll: make(map[[32]byte]enrollmentRecord), devices: make(map[string]deviceRecord)}
+	if err := s.load(); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *EnrollmentStore) persistLocked() error {
+	if s.path == "" {
+		return nil
+	}
+	state := enrollmentDiskState{Version: enrollmentSchemaVersion, Sequence: s.sequence, Enroll: make(map[string]time.Time, len(s.enroll)), Devices: make(map[string]enrollmentDevice, len(s.devices))}
+	for hash, record := range s.enroll {
+		state.Enroll[fmt.Sprintf("%x", hash[:])] = record.expires
+	}
+	for id, record := range s.devices {
+		state.Devices[id] = enrollmentDevice{Public: append(ed25519.PublicKey(nil), record.public...), Token: append([]byte(nil), record.token...)}
+	}
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".enrollment-*.tmp")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if err = tmp.Chmod(0o600); err == nil {
+		encoder := json.NewEncoder(tmp)
+		err = encoder.Encode(state)
+	}
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	if err = os.Rename(name, s.path); err != nil {
+		return err
+	}
+	return os.Chmod(s.path, 0o600)
+}
+
+func (s *EnrollmentStore) load() error {
+	b, err := os.ReadFile(s.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var state enrollmentDiskState
+	if err := json.Unmarshal(b, &state); err != nil {
+		return err
+	}
+	if state.Version != enrollmentSchemaVersion {
+		return fmt.Errorf("unsupported enrollment schema version %d", state.Version)
+	}
+	s.sequence = state.Sequence
+	for encoded, expires := range state.Enroll {
+		decoded, err := hex.DecodeString(encoded)
+		if err != nil || len(decoded) != sha256.Size {
+			return fmt.Errorf("decode enrollment hash %q", encoded)
+		}
+		var hash [32]byte
+		copy(hash[:], decoded)
+		s.enroll[hash] = enrollmentRecord{expires: expires}
+	}
+	for id, device := range state.Devices {
+		if len(device.Public) != ed25519.PublicKeySize || len(device.Token) == 0 {
+			return fmt.Errorf("invalid enrollment device %q", id)
+		}
+		s.devices[id] = deviceRecord{public: append(ed25519.PublicKey(nil), device.Public...), token: append([]byte(nil), device.Token...)}
+	}
+	return nil
 }
 
 func (s *EnrollmentStore) Create(ttl time.Duration) (string, error) {
@@ -54,6 +160,11 @@ func (s *EnrollmentStore) Create(ttl time.Duration) (string, error) {
 		s.devices = make(map[string]deviceRecord)
 	}
 	s.enroll[HashEnrollmentCode(code)] = enrollmentRecord{expires: time.Now().Add(ttl)}
+	if err := s.persistLocked(); err != nil {
+		delete(s.enroll, HashEnrollmentCode(code))
+		s.mu.Unlock()
+		return "", err
+	}
 	s.mu.Unlock()
 	return code, nil
 }
@@ -81,6 +192,11 @@ func (s *EnrollmentStore) Consume(code string, pub ed25519.PublicKey) (DeviceCre
 	s.sequence++
 	deviceID := fmt.Sprintf("device-%d", s.sequence)
 	s.devices[deviceID] = deviceRecord{public: append(ed25519.PublicKey(nil), pub...), token: append([]byte(nil), token...)}
+	if err := s.persistLocked(); err != nil {
+		delete(s.devices, deviceID)
+		s.sequence--
+		return DeviceCredential{}, err
+	}
 	return DeviceCredential{DeviceID: deviceID, Token: token, ExpiresAt: now.Add(30 * 24 * time.Hour)}, nil
 }
 
@@ -676,7 +792,7 @@ func (c *Controller) handshake(conn *websocket.Conn) (string, AgentMetadata, err
 		return "", AgentMetadata{}, err
 	}
 	env, err := Decode(data)
-	if err != nil || env.Header.FrameType != FrameHello {
+	if err != nil || env.Header.FrameType != FrameHello || env.Header.Counter != 1 || env.Header.Version != Version {
 		return "", AgentMetadata{}, errors.New("expected hello")
 	}
 	var hello helloPayload
@@ -700,7 +816,7 @@ func (c *Controller) handshake(conn *websocket.Conn) (string, AgentMetadata, err
 		return "", AgentMetadata{}, err
 	}
 	proofEnv, err := Decode(data)
-	if err != nil || proofEnv.Header.FrameType != FrameProof || proofEnv.Header.DeviceID != hello.DeviceID {
+	if err != nil || proofEnv.Header.FrameType != FrameProof || proofEnv.Header.DeviceID != hello.DeviceID || proofEnv.Header.Counter != 2 || proofEnv.Header.Version != Version {
 		return "", AgentMetadata{}, errors.New("expected challenge proof")
 	}
 	if err := VerifyChallenge(pub, proofEnv.Payload, Version, c.Origin, hello.DeviceID, hello.Nonce, controllerNonce); err != nil {
@@ -825,7 +941,7 @@ func (t *Tunnel) handshake(ctx context.Context, conn *websocket.Conn) error {
 		return err
 	}
 	env, err := Decode(data)
-	if err != nil || env.Header.FrameType != FrameChallenge || env.Header.DeviceID != t.Credential.DeviceID {
+	if err != nil || env.Header.FrameType != FrameChallenge || env.Header.DeviceID != t.Credential.DeviceID || env.Header.Counter != 1 || env.Header.Version != Version {
 		return errors.New("expected challenge")
 	}
 	var challenge challengePayload
@@ -844,7 +960,7 @@ func (t *Tunnel) handshake(ctx context.Context, conn *websocket.Conn) error {
 		return err
 	}
 	ready, err := Decode(data)
-	if err != nil || ready.Header.FrameType != FrameReady || ready.Header.DeviceID != t.Credential.DeviceID {
+	if err != nil || ready.Header.FrameType != FrameReady || ready.Header.DeviceID != t.Credential.DeviceID || ready.Header.Counter != 2 || ready.Header.Version != Version {
 		return errors.New("expected ready")
 	}
 	_ = conn.SetReadDeadline(time.Time{})

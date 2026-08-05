@@ -32,6 +32,13 @@ type Config struct {
 	TailscalePeer  string `json:"tailscale_peer,omitempty"`
 	TailscalePort  int    `json:"tailscale_port,omitempty"`
 	RequireDirect  bool   `json:"tailscale_require_direct,omitempty"`
+	// Reconnect settings are persisted so service-manager launches and manual
+	// launches use identical outage behavior. Durations are human-editable
+	// strings such as "1s" and "1m".
+	ReconnectInitial string  `json:"reconnect_initial,omitempty"`
+	ReconnectMaximum string  `json:"reconnect_maximum,omitempty"`
+	ReconnectFactor  float64 `json:"reconnect_factor,omitempty"`
+	ReconnectJitter  float64 `json:"reconnect_jitter,omitempty"`
 }
 
 type Session struct {
@@ -106,7 +113,7 @@ func (p Paths) LoadConfig() (Config, error) {
 		return Config{}, fmt.Errorf("load config: %w", err)
 	}
 	if !found {
-		return Config{Version: SchemaVersion, TrustMode: "trusted", Transport: "auto"}, nil
+		return Config{Version: SchemaVersion, TrustMode: "trusted", Transport: "auto", ReconnectInitial: "1s", ReconnectMaximum: "1m", ReconnectFactor: 2, ReconnectJitter: .2}, nil
 	}
 	if err := checkVersion(config.Version); err != nil {
 		return Config{}, fmt.Errorf("load config: %w", err)
@@ -117,6 +124,7 @@ func (p Paths) LoadConfig() (Config, error) {
 	if config.Transport == "" {
 		config.Transport = "auto"
 	}
+	setReconnectDefaults(&config)
 	return config, nil
 }
 
@@ -128,6 +136,7 @@ func (p Paths) SaveConfig(config Config) error {
 	if config.Transport == "" {
 		config.Transport = "auto"
 	}
+	setReconnectDefaults(&config)
 	if err := p.Ensure(); err != nil {
 		return err
 	}
@@ -135,6 +144,33 @@ func (p Paths) SaveConfig(config Config) error {
 		return fmt.Errorf("save config: %w", err)
 	}
 	return nil
+}
+
+func setReconnectDefaults(config *Config) {
+	// A fully omitted policy gets safe defaults. Once any reconnect field is
+	// present, preserve explicit zero jitter (a useful deterministic setting).
+	if config.ReconnectInitial != "" || config.ReconnectMaximum != "" || config.ReconnectFactor != 0 {
+		if config.ReconnectInitial == "" {
+			config.ReconnectInitial = "1s"
+		}
+		if config.ReconnectMaximum == "" {
+			config.ReconnectMaximum = "1m"
+		}
+		if config.ReconnectFactor == 0 {
+			config.ReconnectFactor = 2
+		}
+		return
+	}
+	if config.ReconnectInitial == "" {
+		config.ReconnectInitial = "1s"
+	}
+	if config.ReconnectMaximum == "" {
+		config.ReconnectMaximum = "1m"
+	}
+	if config.ReconnectFactor == 0 {
+		config.ReconnectFactor = 2
+	}
+	config.ReconnectJitter = .2
 }
 
 func (p Paths) LoadState() (State, error) {

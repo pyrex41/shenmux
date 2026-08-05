@@ -250,6 +250,7 @@ func runLogin(args []string, stdout, stderr io.Writer) error {
 	flags := newFlags("shenmux login", stderr)
 	controller := flags.String("controller", controllerDefault, "controller HTTPS URL")
 	code := flags.String("code", "", "single-use enrollment code")
+	trustMode := flags.String("trust-mode", "", "relay content trust mode (trusted or blind)")
 	configFile := flags.String("config", "", "configuration file")
 	flags.Usage = func() {
 		fmt.Fprintln(flags.Output(), "usage: shenmux login --controller URL")
@@ -282,6 +283,13 @@ func runLogin(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	config.Controller = normalized
+	if *trustMode != "" {
+		mode := relay.TrustMode(strings.ToLower(strings.TrimSpace(*trustMode)))
+		if err := mode.Validate(); err != nil {
+			return err
+		}
+		config.TrustMode = string(mode)
+	}
 	if err := paths.SaveConfig(config); err != nil {
 		return err
 	}
@@ -394,15 +402,23 @@ func runStatus(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	report := struct {
-		Version    string             `json:"binary_version"`
-		Controller string             `json:"controller,omitempty"`
-		TrustMode  string             `json:"trust_mode"`
-		Transport  string             `json:"transport"`
-		Direct     string             `json:"direct_endpoint,omitempty"`
-		DeviceID   string             `json:"device_id,omitempty"`
-		StateDir   string             `json:"state_dir"`
-		Sessions   []appstate.Session `json:"sessions"`
+		Version    string `json:"binary_version"`
+		Controller string `json:"controller,omitempty"`
+		TrustMode  string `json:"trust_mode"`
+		Transport  string `json:"transport"`
+		Direct     string `json:"direct_endpoint,omitempty"`
+		DeviceID   string `json:"device_id,omitempty"`
+		StateDir   string `json:"state_dir"`
+		Reconnect  struct {
+			Initial string  `json:"initial"`
+			Maximum string  `json:"maximum"`
+			Factor  float64 `json:"factor"`
+			Jitter  float64 `json:"jitter"`
+		} `json:"reconnect"`
+		Sessions []appstate.Session `json:"sessions"`
 	}{Version: version, Controller: config.Controller, TrustMode: config.TrustMode, Transport: config.Transport, Direct: config.DirectEndpoint, DeviceID: state.DeviceID, StateDir: paths.StateDir}
+	report.Reconnect.Initial, report.Reconnect.Maximum = config.ReconnectInitial, config.ReconnectMaximum
+	report.Reconnect.Factor, report.Reconnect.Jitter = config.ReconnectFactor, config.ReconnectJitter
 	for _, session := range state.Sessions {
 		report.Sessions = append(report.Sessions, session)
 	}
@@ -416,7 +432,7 @@ func runStatus(args []string, stdout, stderr io.Writer) error {
 	if controller == "" {
 		controller = "local-only"
 	}
-	fmt.Fprintf(stdout, "version: %s\ncontroller: %s\ntrust mode: %s\ntransport: %s\nstate: %s\n", report.Version, controller, report.TrustMode, report.Transport, report.StateDir)
+	fmt.Fprintf(stdout, "version: %s\ncontroller: %s\ntrust mode: %s\ntransport: %s\nreconnect: %s → %s (×%g, jitter %g)\nstate: %s\n", report.Version, controller, report.TrustMode, report.Transport, report.Reconnect.Initial, report.Reconnect.Maximum, report.Reconnect.Factor, report.Reconnect.Jitter, report.StateDir)
 	if report.Direct != "" {
 		fmt.Fprintf(stdout, "direct: %s\n", report.Direct)
 	}
@@ -500,6 +516,10 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 	tailscalePeer := flags.String("tailscale-peer", os.Getenv("SHENMUX_TAILSCALE_PEER"), "Tailscale peer hostname/IP/ID to discover")
 	tailscalePort := flags.Int("tailscale-port", 8788, "Tailscale peer WebSocket port")
 	requireDirect := flags.Bool("tailscale-require-direct", false, "fail instead of using DERP/peer-relay when selecting Tailscale")
+	reconnectInitial := flags.Duration("reconnect-initial", 0, "initial reconnect delay (persisted)")
+	reconnectMaximum := flags.Duration("reconnect-maximum", 0, "maximum reconnect delay (persisted)")
+	reconnectFactor := flags.Float64("reconnect-factor", 0, "reconnect exponential factor (persisted)")
+	reconnectJitter := flags.Float64("reconnect-jitter", -1, "reconnect jitter fraction, 0 to 1 (persisted)")
 	cluster := flags.String("cluster", os.Getenv("SHENMUX_CLUSTER"), "Kubernetes cluster identity")
 	namespace := flags.String("namespace", firstEnv("SHENMUX_NAMESPACE", "POD_NAMESPACE"), "Kubernetes namespace")
 	workload := flags.String("workload", os.Getenv("SHENMUX_WORKLOAD"), "Kubernetes workload name")
@@ -550,6 +570,36 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 	if !*requireDirect {
 		*requireDirect = config.RequireDirect
 	}
+	// Empty flag values inherit persisted settings. The tunnel itself applies
+	// the values below, while saving them makes restarts deterministic.
+	if *reconnectInitial <= 0 {
+		if d, parseErr := time.ParseDuration(config.ReconnectInitial); parseErr == nil {
+			*reconnectInitial = d
+		}
+	}
+	if *reconnectMaximum <= 0 {
+		if d, parseErr := time.ParseDuration(config.ReconnectMaximum); parseErr == nil {
+			*reconnectMaximum = d
+		}
+	}
+	if *reconnectFactor == 0 {
+		*reconnectFactor = config.ReconnectFactor
+	}
+	if *reconnectJitter < 0 {
+		*reconnectJitter = config.ReconnectJitter
+	}
+	if *reconnectInitial <= 0 {
+		*reconnectInitial = time.Second
+	}
+	if *reconnectMaximum <= 0 {
+		*reconnectMaximum = time.Minute
+	}
+	if *reconnectFactor < 1 {
+		return errors.New("--reconnect-factor must be at least 1")
+	}
+	if *reconnectJitter < 0 || *reconnectJitter > 1 {
+		return errors.New("--reconnect-jitter must be between 0 and 1")
+	}
 	*transportMode = strings.ToLower(strings.TrimSpace(*transportMode))
 	if *transportMode != "auto" && *transportMode != "relay" && *transportMode != "tailscale" {
 		return fmt.Errorf("invalid --transport %q (want auto, relay, or tailscale)", *transportMode)
@@ -587,6 +637,10 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 	config.TailscalePeer = *tailscalePeer
 	config.TailscalePort = *tailscalePort
 	config.RequireDirect = *requireDirect
+	config.ReconnectInitial = reconnectInitial.String()
+	config.ReconnectMaximum = reconnectMaximum.String()
+	config.ReconnectFactor = *reconnectFactor
+	config.ReconnectJitter = *reconnectJitter
 	if saveErr := paths.SaveConfig(config); saveErr != nil {
 		return saveErr
 	}
@@ -643,7 +697,7 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 		Credential: relay.DeviceCredential{DeviceID: state.DeviceID, Token: state.DeviceToken, ExpiresAt: expires},
 		Metadata:   metadata,
 		PrivateKey: ed25519.PrivateKey(state.DevicePrivateKey),
-		Policy:     relay.BackoffPolicy{Initial: time.Second, Maximum: time.Minute, Factor: 2, Jitter: .2}}
+		Policy:     relay.BackoffPolicy{Initial: *reconnectInitial, Maximum: *reconnectMaximum, Factor: *reconnectFactor, Jitter: *reconnectJitter}}
 	log.New(stderr, "", 0).Printf("shenmux agent device=%s controller=%s transport=%s direct=%s", state.DeviceID, *controller, *transportMode, *directEndpoint)
 	err = tunnel.Run(ctx, func(conn *websocket.Conn) error {
 		now := time.Now().UTC()
@@ -660,6 +714,8 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 			}
 			return naming.DefaultEndpoints(session)
 		})
+		bridge.TrustMode = relay.TrustMode(config.TrustMode)
+		bridge.PrivateKey = ed25519.PrivateKey(state.DevicePrivateKey)
 		bridgeErr := bridge.Serve(ctx, conn)
 		if bridgeErr != nil && !errors.Is(bridgeErr, context.Canceled) {
 			log.New(stderr, "", 0).Printf("agent bridge disconnected: %v", bridgeErr)
@@ -694,6 +750,7 @@ func runController(ctx context.Context, args []string, stderr io.Writer) error {
 	flags := newFlags("shenmux controller", stderr)
 	listen := flags.String("listen", "127.0.0.1:8788", "HTTPS/WSS controller listen address (HTTP for local development)")
 	origin := flags.String("origin", "http://localhost", "controller origin bound into agent challenge proofs")
+	stateDir := flags.String("state-dir", os.Getenv("SHENMUX_CONTROLLER_STATE_DIR"), "durable controller state directory")
 	enrollmentCount := flags.Int("enrollment-count", 1, "number of single-use enrollment codes to print")
 	devBrowserSubject := flags.String("dev-browser-subject", "", "enable local workspace browser subject (development only)")
 	if err := flags.Parse(args); err != nil {
@@ -705,8 +762,29 @@ func runController(ctx context.Context, args []string, stderr io.Writer) error {
 	if flags.NArg() != 0 {
 		return errors.New("controller does not accept positional arguments")
 	}
-	store := relay.NewEnrollmentStore()
+	if *stateDir == "" {
+		root := os.Getenv("XDG_STATE_HOME")
+		if root == "" {
+			home, homeErr := os.UserHomeDir()
+			if homeErr != nil {
+				return homeErr
+			}
+			root = filepath.Join(home, ".local", "state")
+		}
+		*stateDir = filepath.Join(root, "shenmux-controller")
+	}
+	if err := os.MkdirAll(*stateDir, 0o700); err != nil {
+		return fmt.Errorf("prepare controller state directory: %w", err)
+	}
+	store, err := relay.NewPersistentEnrollmentStore(filepath.Join(*stateDir, "enrollment.json"))
+	if err != nil {
+		return fmt.Errorf("load controller enrollment state: %w", err)
+	}
 	controller := relay.NewController(store, *origin)
+	controller.Policy, err = policy.New(filepath.Join(*stateDir, "policy.json"))
+	if err != nil {
+		return fmt.Errorf("load controller policy state: %w", err)
+	}
 	controller.DevBrowserSubject = *devBrowserSubject
 	if *devBrowserSubject != "" {
 		if _, err := controller.Policy.AddGrant(*devBrowserSubject, "", "*", []policy.Permission{policy.PermissionObserve, policy.PermissionControl}, nil); err != nil {

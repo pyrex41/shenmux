@@ -69,4 +69,16 @@ The result measures WebSocket input send through the gateway and muxd until
 the first echoed screen delta arrives. It does not include browser input
 processing or paint; use Chrome's Performance panel for those segments. Run
 the same harness with a 50--100 ms network profile when comparing remote
-deployments.
+deployments. When host-level network emulation is unavailable, the harness
+also supports a reproducible application-level profile:
+
+```sh
+nix develop --command node scripts/bench-web-latency.mjs \
+  --url ws://127.0.0.1:8789/ws --count 40 --warmup 5 --simulated-rtt-ms 100
+```
+
+The output labels this as `simulated_rtt_ms`; use `dnctl`, `tc`, or an
+equivalent network emulator for wire-level RTT measurements.
+
+For the egress-only hosted/self-hosted deployment contract (including Fly,
+AWS, Hetzner, and home servers), see [DEPLOYMENT.md](DEPLOYMENT.md).
