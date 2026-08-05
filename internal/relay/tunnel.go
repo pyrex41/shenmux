@@ -24,8 +24,9 @@ import (
 
 type enrollmentRecord struct{ expires time.Time }
 type deviceRecord struct {
-	public ed25519.PublicKey
-	token  []byte
+	public  ed25519.PublicKey
+	token   []byte
+	expires time.Time
 }
 
 type enrollmentDiskState struct {
@@ -36,11 +37,12 @@ type enrollmentDiskState struct {
 }
 
 type enrollmentDevice struct {
-	Public ed25519.PublicKey `json:"public"`
-	Token  []byte            `json:"token"`
+	Public    ed25519.PublicKey `json:"public"`
+	Token     []byte            `json:"token"`
+	ExpiresAt time.Time         `json:"expires_at"`
 }
 
-const enrollmentSchemaVersion = 1
+const enrollmentSchemaVersion = 2
 
 // EnrollmentStore is a small in-memory store suitable for tests and a
 // development controller. Production controllers should replace it with a
@@ -80,7 +82,7 @@ func (s *EnrollmentStore) persistLocked() error {
 		state.Enroll[fmt.Sprintf("%x", hash[:])] = record.expires
 	}
 	for id, record := range s.devices {
-		state.Devices[id] = enrollmentDevice{Public: append(ed25519.PublicKey(nil), record.public...), Token: append([]byte(nil), record.token...)}
+		state.Devices[id] = enrollmentDevice{Public: append(ed25519.PublicKey(nil), record.public...), Token: append([]byte(nil), record.token...), ExpiresAt: record.expires}
 	}
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return err
@@ -122,7 +124,7 @@ func (s *EnrollmentStore) load() error {
 	if err := json.Unmarshal(b, &state); err != nil {
 		return err
 	}
-	if state.Version != enrollmentSchemaVersion {
+	if state.Version != 1 && state.Version != enrollmentSchemaVersion {
 		return fmt.Errorf("unsupported enrollment schema version %d", state.Version)
 	}
 	s.sequence = state.Sequence
@@ -139,7 +141,7 @@ func (s *EnrollmentStore) load() error {
 		if len(device.Public) != ed25519.PublicKeySize || len(device.Token) == 0 {
 			return fmt.Errorf("invalid enrollment device %q", id)
 		}
-		s.devices[id] = deviceRecord{public: append(ed25519.PublicKey(nil), device.Public...), token: append([]byte(nil), device.Token...)}
+		s.devices[id] = deviceRecord{public: append(ed25519.PublicKey(nil), device.Public...), token: append([]byte(nil), device.Token...), expires: device.ExpiresAt}
 	}
 	return nil
 }
@@ -187,27 +189,35 @@ func (s *EnrollmentStore) Consume(code string, pub ed25519.PublicKey) (DeviceCre
 	delete(s.enroll, hash) // consume atomically before issuing a credential
 	token := make([]byte, 32)
 	if _, err := rand.Read(token); err != nil {
+		s.enroll[hash] = rec
 		return DeviceCredential{}, fmt.Errorf("generate device credential: %w", err)
 	}
 	s.sequence++
 	deviceID := fmt.Sprintf("device-%d", s.sequence)
-	s.devices[deviceID] = deviceRecord{public: append(ed25519.PublicKey(nil), pub...), token: append([]byte(nil), token...)}
+	expiresAt := now.Add(30 * 24 * time.Hour)
+	s.devices[deviceID] = deviceRecord{public: append(ed25519.PublicKey(nil), pub...), token: append([]byte(nil), token...), expires: expiresAt}
 	if err := s.persistLocked(); err != nil {
 		delete(s.devices, deviceID)
 		s.sequence--
+		s.enroll[hash] = rec
 		return DeviceCredential{}, err
 	}
-	return DeviceCredential{DeviceID: deviceID, Token: token, ExpiresAt: now.Add(30 * 24 * time.Hour)}, nil
+	return DeviceCredential{DeviceID: deviceID, Token: token, ExpiresAt: expiresAt}, nil
 }
 
 func (s *EnrollmentStore) authenticate(id string, token []byte) (ed25519.PublicKey, bool) {
+	pub, _, ok := s.authenticateAt(id, token, time.Now())
+	return pub, ok
+}
+
+func (s *EnrollmentStore) authenticateAt(id string, token []byte, now time.Time) (ed25519.PublicKey, time.Time, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec, ok := s.devices[id]
-	if !ok || len(token) != len(rec.token) || subtle.ConstantTimeCompare(token, rec.token) != 1 {
-		return nil, false
+	if !ok || rec.expires.IsZero() || !now.Before(rec.expires) || len(token) != len(rec.token) || subtle.ConstantTimeCompare(token, rec.token) != 1 {
+		return nil, time.Time{}, false
 	}
-	return append(ed25519.PublicKey(nil), rec.public...), true
+	return append(ed25519.PublicKey(nil), rec.public...), rec.expires, true
 }
 
 type helloPayload struct {
@@ -239,7 +249,6 @@ type Controller struct {
 	mu                sync.Mutex
 	agents            map[string]*controllerAgent
 	streams           map[streamKey]*authorizedStream
-	usedCapabilities  map[string]struct{}
 }
 
 type streamKey struct{ device, session, stream string }
@@ -272,7 +281,6 @@ func NewController(store *EnrollmentStore, origin string) *Controller {
 		CapabilityTTL: time.Minute, ControlLeaseTTL: 30 * time.Second,
 		Upgrader: websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }},
 		agents:   make(map[string]*controllerAgent), streams: make(map[streamKey]*authorizedStream),
-		usedCapabilities: make(map[string]struct{}),
 	}
 }
 
@@ -349,7 +357,7 @@ func (c *Controller) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
-	deviceID, metadata, hsErr := c.handshake(conn)
+	deviceID, metadata, credentialExpiresAt, hsErr := c.handshake(conn)
 	if hsErr != nil {
 		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, hsErr.Error()), time.Now().Add(time.Second))
 		return
@@ -358,6 +366,9 @@ func (c *Controller) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "device is revoked"), time.Now().Add(time.Second))
 		return
 	}
+	// Keep the absolute credential deadline after the handshake so an
+	// established device tunnel cannot outlive its server-side credential.
+	_ = conn.SetReadDeadline(credentialExpiresAt)
 	// Register the authenticated agent and route opaque stream envelopes until
 	// the connection closes. In blind mode the controller only decodes the
 	// routing header; payload bytes are forwarded without inspection.
@@ -457,20 +468,20 @@ func (c *Controller) handleBrowser(w http.ResponseWriter, r *http.Request) {
 	c.mu.Lock()
 	agent := c.agents[env.Header.DeviceID]
 	_, duplicateStream := c.streams[key]
-	_, used := c.usedCapabilities[capability.ID]
-	if agent != nil && !duplicateStream && !used {
-		c.usedCapabilities[capability.ID] = struct{}{}
-	}
 	c.mu.Unlock()
-	if agent == nil || duplicateStream || used {
+	if agent == nil || duplicateStream {
 		reason := "agent is offline"
 		if duplicateStream {
 			reason = "stream already exists"
-		} else if used {
-			reason = "capability was already used"
 		}
 		c.audit(policy.AuditEvent{Actor: subject, DeviceID: key.device, Session: key.session, Action: "attach", Capability: capability.ID, Outcome: "denied", Reason: reason})
 		closeWebSocket(conn, websocket.ClosePolicyViolation, reason)
+		return
+	}
+	capability, err = c.Policy.RedeemCapability(presented.ID, presented.Token, permission, time.Now().UTC())
+	if err != nil {
+		c.audit(policy.AuditEvent{Actor: subject, DeviceID: key.device, Session: key.session, Action: "attach", Capability: presented.ID, Outcome: "denied", Reason: err.Error()})
+		closeWebSocket(conn, websocket.ClosePolicyViolation, "attach denied")
 		return
 	}
 	stream := &authorizedStream{conn: conn, key: key, capability: capability, permission: permission, blind: blind, closed: make(chan struct{})}
@@ -784,48 +795,48 @@ func controllerWrite(agent *controllerAgent, data []byte) error {
 	return agent.conn.WriteMessage(websocket.BinaryMessage, data)
 }
 
-func (c *Controller) handshake(conn *websocket.Conn) (string, AgentMetadata, error) {
+func (c *Controller) handshake(conn *websocket.Conn) (string, AgentMetadata, time.Time, error) {
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	defer conn.SetReadDeadline(time.Time{})
 	_, data, err := conn.ReadMessage()
 	if err != nil {
-		return "", AgentMetadata{}, err
+		return "", AgentMetadata{}, time.Time{}, err
 	}
 	env, err := Decode(data)
 	if err != nil || env.Header.FrameType != FrameHello || env.Header.Counter != 1 || env.Header.Version != Version {
-		return "", AgentMetadata{}, errors.New("expected hello")
+		return "", AgentMetadata{}, time.Time{}, errors.New("expected hello")
 	}
 	var hello helloPayload
 	if err := json.Unmarshal(env.Payload, &hello); err != nil {
-		return "", AgentMetadata{}, errors.New("invalid hello payload")
+		return "", AgentMetadata{}, time.Time{}, errors.New("invalid hello payload")
 	}
-	pub, ok := c.Store.authenticate(hello.DeviceID, hello.Token)
+	pub, expiresAt, ok := c.Store.authenticateAt(hello.DeviceID, hello.Token, time.Now())
 	if !ok || len(hello.Nonce) == 0 {
-		return "", AgentMetadata{}, errors.New("invalid device credential")
+		return "", AgentMetadata{}, time.Time{}, errors.New("invalid device credential")
 	}
 	controllerNonce := make([]byte, 32)
 	if _, err := rand.Read(controllerNonce); err != nil {
-		return "", AgentMetadata{}, err
+		return "", AgentMetadata{}, time.Time{}, err
 	}
 	challenge, _ := json.Marshal(challengePayload{Nonce: controllerNonce})
 	if err := writeEnvelope(conn, FrameChallenge, hello.DeviceID, 1, challenge); err != nil {
-		return "", AgentMetadata{}, err
+		return "", AgentMetadata{}, time.Time{}, err
 	}
 	_, data, err = conn.ReadMessage()
 	if err != nil {
-		return "", AgentMetadata{}, err
+		return "", AgentMetadata{}, time.Time{}, err
 	}
 	proofEnv, err := Decode(data)
 	if err != nil || proofEnv.Header.FrameType != FrameProof || proofEnv.Header.DeviceID != hello.DeviceID || proofEnv.Header.Counter != 2 || proofEnv.Header.Version != Version {
-		return "", AgentMetadata{}, errors.New("expected challenge proof")
+		return "", AgentMetadata{}, time.Time{}, errors.New("expected challenge proof")
 	}
 	if err := VerifyChallenge(pub, proofEnv.Payload, Version, c.Origin, hello.DeviceID, hello.Nonce, controllerNonce); err != nil {
-		return "", AgentMetadata{}, err
+		return "", AgentMetadata{}, time.Time{}, err
 	}
 	if err := writeEnvelope(conn, FrameReady, hello.DeviceID, 2, []byte(`{"version":1}`)); err != nil {
-		return "", AgentMetadata{}, err
+		return "", AgentMetadata{}, time.Time{}, err
 	}
-	return hello.DeviceID, hello.Metadata, nil
+	return hello.DeviceID, hello.Metadata, expiresAt, nil
 }
 
 // DiscoveredSession is returned by GET /sessions. It is deliberately

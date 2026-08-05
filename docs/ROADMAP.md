@@ -1,22 +1,24 @@
 # Roadmap
 
-The product delivery roadmap is defined in [V1/V2 plan](V1-V2-PLAN.md).
-V1 keeps server-owned PTY/session leadership and adds the authenticated
-outbound relay. V2 hardens identity/policy and adds blind relay plus optional
-direct transport. Local-first replication, handoff, and Golem are V3 ideas,
-not current implementation drivers.
+The maintained implementation status and release gates are in
+[V1/V2-PLAN.md](V1-V2-PLAN.md). In short:
 
-## Existing runtime foundations
+- V1 is a coherent, installable local release around the implemented PTY,
+  local IPC, native client, and local browser gateway.
+- V2 turns the implemented development controller/agent foundation into an
+  operable service by adding real browser identity, administration, durable
+  storage/operations, production packaging, deployment tests, and a shipped
+  blind-capable client.
 
-1. Pin and vendor a reproducible `libghostty-vt` build, then wire terminal effect callbacks that write required responses back through the guarded PTY writer.
-2. Add a native full-terminal checkpoint codec when Ghostty exposes stable export/import, retaining only a bounded post-checkpoint replay log.
-3. Build a graphical client that embeds libghostty, replays historical resizes off-screen, and renders the exact snapshot rather than replaying into the host terminal.
-4. Keep CURVE/TCP authentication as a local-prototype hardening option only;
-   the product path is authenticated outbound WSS relay as specified in
-   [V1/V2 plan](V1-V2-PLAN.md).
-5. Add per-client viewport dimensions and an explicit authoritative-resize policy instead of last-writer-wins.
-6. Add journal persistence, daemon restart recovery, named session discovery, and process supervision.
-7. Keep Shen as the authoritative control-plane reducer: lower typed commands to state-plus-effect results, and keep PTY, terminal, ZeroMQ, clocks, persistence, and effect execution in Go adapters.
-8. Replace the mux-specific bootstrap emitter with upstream `shengen` once its generated reducer/effect representations and host ABI match the required boundary.
-9. Run the Bifrost suite across shen-go, shen-rust, and shen-lua in CI, with the primary Shen reducer check required by the standard build gate.
-10. Restructure or specialize the session algebra so the complete reducer can run under portable Shen `tc +` checking without exhausting implementation inference budgets.
+The current controller, blind-stream, and direct/Tailscale code should be read
+as implementation foundations, not evidence that those production gates have
+been met.
+
+Longer-term runtime work includes broader terminal compatibility, an optional
+native Ghostty snapshot codec when a stable API is available, a better
+per-client viewport/authoritative-resize policy, and continued tightening of
+the Shen reducer boundary and portable Shen test suite.
+
+Local-first replicated logs, offline editing, PTY migration/handoff, Golem,
+and collaborative conflict resolution are later research topics. They are not
+part of the current runtime or V1/V2 deployment contract.

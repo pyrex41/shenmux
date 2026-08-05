@@ -17,8 +17,9 @@ ROUTER adds the routing identity as the first transport frame. Published message
 The implemented local protocol version is currently `2`. Metadata is limited
 to 64 KiB and payloads to 64 MiB at the decoder boundary. The outbound relay
 wraps these multipart frames byte-for-byte; it does not define a second
-terminal protocol. The relay plan and trust-mode sequencing are in
-[V1/V2 plan](V1-V2-PLAN.md).
+terminal protocol. Current relay behavior is described in
+[ARCHITECTURE.md](ARCHITECTURE.md), and its security boundary is in
+[TRUST-MODEL.md](TRUST-MODEL.md).
 
 ## Metadata
 

@@ -6,6 +6,7 @@ package agent
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -59,7 +60,7 @@ func NewBridge(deviceID string, controlFor func(string) (string, string, error))
 	return &Bridge{DeviceID: deviceID, TrustMode: relay.TrustTrusted, ControlFor: controlFor, streams: make(map[string]*stream)}
 }
 
-func (b *Bridge) open(ctx context.Context, session string) (sessionClient, error) {
+func (b *Bridge) open(ctx context.Context, session, streamID string) (sessionClient, error) {
 	if b.OpenClient != nil {
 		return b.OpenClient(ctx, session)
 	}
@@ -70,12 +71,18 @@ func (b *Bridge) open(ctx context.Context, session string) (sessionClient, error
 	if err != nil {
 		return nil, err
 	}
-	return muxclient.New(ctx, muxclient.Config{Session: session, ClientID: "relay-" + b.DeviceID, ControlEndpoint: control, DataEndpoint: data})
+	return muxclient.New(ctx, muxclient.Config{Session: session, ClientID: localClientID(b.DeviceID, session, streamID), ControlEndpoint: control, DataEndpoint: data})
+}
+
+func localClientID(deviceID, session, streamID string) string {
+	digest := sha256.Sum256([]byte(deviceID + "\x00" + session + "\x00" + streamID))
+	return fmt.Sprintf("relay-%x", digest[:16])
 }
 
 // Serve reads relay messages until the tunnel closes. The caller owns the
 // WebSocket write lock; Serve serializes all bridge output itself.
 func (b *Bridge) Serve(ctx context.Context, conn *websocket.Conn) error {
+	defer b.closeAllStreams()
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -94,7 +101,7 @@ func (b *Bridge) Serve(ctx context.Context, conn *websocket.Conn) error {
 		}
 		if env.Header.FrameType == relay.FrameOpen {
 			if err := b.handleOpen(ctx, conn, env); err != nil {
-				return err
+				b.rejectStream(conn, env, err)
 			}
 			continue
 		}
@@ -107,20 +114,23 @@ func (b *Bridge) Serve(ctx context.Context, conn *websocket.Conn) error {
 		if active != nil && active.blind != nil {
 			opened, err := active.blind.OpenData(env)
 			if err != nil {
-				return fmt.Errorf("decrypt remote session: %w", err)
+				b.rejectStream(conn, env, fmt.Errorf("decrypt remote session: %w", err))
+				continue
 			}
 			env = opened
 		}
 		frames, err := relay.UnmarshalFrames(env.Payload)
 		if err != nil {
-			return fmt.Errorf("decode remote session: %w", err)
+			b.rejectStream(conn, env, fmt.Errorf("decode remote session: %w", err))
+			continue
 		}
 		msg, err := protocol.Decode(frames)
 		if err != nil {
-			return fmt.Errorf("decode remote session message: %w", err)
+			b.rejectStream(conn, env, fmt.Errorf("decode remote session message: %w", err))
+			continue
 		}
 		if err := b.handleMessage(ctx, conn, env, msg); err != nil {
-			return err
+			b.rejectStream(conn, env, err)
 		}
 	}
 }
@@ -152,7 +162,7 @@ func (b *Bridge) handleOpen(ctx context.Context, conn *websocket.Conn, env relay
 		if active.client != nil {
 			return nil
 		}
-		client, err := b.open(ctx, env.Header.SessionID)
+		client, err := b.open(ctx, env.Header.SessionID, env.Header.StreamID)
 		if err != nil {
 			b.closeStream(env.Header.StreamID)
 			return err
@@ -222,7 +232,7 @@ func (b *Bridge) handleOpen(ctx context.Context, conn *websocket.Conn, env relay
 	if !blind.Ready() {
 		return nil
 	}
-	client, err := b.open(ctx, env.Header.SessionID)
+	client, err := b.open(ctx, env.Header.SessionID, env.Header.StreamID)
 	if err != nil {
 		b.closeStream(env.Header.StreamID)
 		return err
@@ -251,7 +261,7 @@ func (b *Bridge) handleMessageAccepted(ctx context.Context, conn *websocket.Conn
 		if msg.Kind != protocol.KindAttach {
 			return fmt.Errorf("session stream %q was not attached", env.Header.StreamID)
 		}
-		client, err := b.open(ctx, env.Header.SessionID)
+		client, err := b.open(ctx, env.Header.SessionID, env.Header.StreamID)
 		if err != nil {
 			return err
 		}
@@ -326,6 +336,7 @@ func (b *Bridge) handleMessageAccepted(ctx context.Context, conn *websocket.Conn
 }
 
 func (b *Bridge) forwardEvents(ctx context.Context, conn *websocket.Conn, session, streamID string, active *stream) {
+	defer b.closeStreamIf(streamID, active)
 	for {
 		select {
 		case <-ctx.Done():
@@ -396,7 +407,55 @@ func (b *Bridge) closeStream(id string) {
 	delete(b.streams, id)
 	b.mu.Unlock()
 	if active != nil {
+		b.closeActive(active)
+	}
+}
+
+func (b *Bridge) closeStreamIf(id string, want *stream) {
+	b.mu.Lock()
+	active := b.streams[id]
+	if active == want {
+		delete(b.streams, id)
+	} else {
+		active = nil
+	}
+	b.mu.Unlock()
+	if active != nil {
+		b.closeActive(active)
+	}
+}
+
+func (b *Bridge) closeAllStreams() {
+	b.mu.Lock()
+	streams := b.streams
+	b.streams = make(map[string]*stream)
+	b.mu.Unlock()
+	for _, active := range streams {
+		b.closeActive(active)
+	}
+}
+
+func (b *Bridge) closeActive(active *stream) {
+	if active.cancel != nil {
 		active.cancel()
+	}
+	if active.client != nil {
 		_ = active.client.Close()
 	}
+}
+
+func (b *Bridge) rejectStream(conn *websocket.Conn, env relay.Envelope, cause error) {
+	b.mu.Lock()
+	active := b.streams[env.Header.StreamID]
+	b.mu.Unlock()
+	closed := relay.Envelope{Header: env.Header, Payload: []byte(cause.Error())}
+	closed.Header.FrameType = relay.FrameClose
+	if active != nil {
+		_ = b.writeEnvelope(conn, closed, active)
+	} else if encoded, err := closed.Encode(); err == nil {
+		b.writeMu.Lock()
+		_ = conn.WriteMessage(websocket.BinaryMessage, encoded)
+		b.writeMu.Unlock()
+	}
+	b.closeStream(env.Header.StreamID)
 }

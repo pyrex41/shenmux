@@ -619,8 +619,8 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 				return fmt.Errorf("resolve tailscale peer: %w", resolveErr)
 			}
 			log.New(stderr, "", 0).Printf("tailscale unavailable; using relay: %v", resolveErr)
-		} else if len(resolved) > 0 {
-			*directEndpoint = resolved[0].URL
+		} else {
+			*directEndpoint = resolved
 		}
 	}
 	if *transportMode == "tailscale" && strings.TrimSpace(*directEndpoint) == "" {

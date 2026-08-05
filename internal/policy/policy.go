@@ -45,6 +45,7 @@ type Capability struct {
 	Permissions []Permission `json:"permissions"`
 	IssuedAt    time.Time    `json:"issued_at"`
 	ExpiresAt   time.Time    `json:"expires_at"`
+	UsedAt      *time.Time   `json:"used_at,omitempty"`
 	RevokedAt   *time.Time   `json:"revoked_at,omitempty"`
 }
 
@@ -123,6 +124,35 @@ func NewStore(path string) (*Store, error) { return New(path) }
 
 func newState() diskState {
 	return diskState{Version: schemaVersion, Grants: map[string]Grant{}, Capabilities: map[string]Capability{}, Leases: map[string]Lease{}}
+}
+
+func cloneState(src diskState) diskState {
+	dst := src
+	dst.Grants = make(map[string]Grant, len(src.Grants))
+	for id, grant := range src.Grants {
+		grant.Permissions = append([]Permission(nil), grant.Permissions...)
+		dst.Grants[id] = grant
+	}
+	dst.Capabilities = make(map[string]Capability, len(src.Capabilities))
+	for id, capability := range src.Capabilities {
+		capability.Permissions = append([]Permission(nil), capability.Permissions...)
+		dst.Capabilities[id] = capability
+	}
+	dst.Leases = make(map[string]Lease, len(src.Leases))
+	for session, lease := range src.Leases {
+		dst.Leases[session] = lease
+	}
+	dst.Revocations = append([]Revocation(nil), src.Revocations...)
+	dst.Audit = append([]AuditEvent(nil), src.Audit...)
+	return dst
+}
+
+func (s *Store) persistOrRollbackLocked(previous diskState) error {
+	if err := s.persistLocked(); err != nil {
+		s.state = previous
+		return err
+	}
+	return nil
 }
 
 func randomID(prefix string) (string, error) {
@@ -223,8 +253,9 @@ func (s *Store) AddGrant(subject, deviceID, session string, permissions []Permis
 	g := Grant{ID: id, Subject: subject, DeviceID: deviceID, Session: session, Permissions: append([]Permission(nil), permissions...), CreatedAt: time.Now().UTC(), ExpiresAt: expiresAt}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	previous := cloneState(s.state)
 	s.state.Grants[id] = g
-	if err := s.persistLocked(); err != nil {
+	if err := s.persistOrRollbackLocked(previous); err != nil {
 		return Grant{}, err
 	}
 	return g, nil
@@ -258,6 +289,7 @@ func (s *Store) CanControl(subject, deviceID, session string, now time.Time) boo
 func (s *Store) RevokeGrant(id, reason string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	previous := cloneState(s.state)
 	g, ok := s.state.Grants[id]
 	if !ok {
 		return errors.New("grant not found")
@@ -266,9 +298,10 @@ func (s *Store) RevokeGrant(id, reason string) error {
 	g.RevokedAt = &now
 	s.state.Grants[id] = g
 	if err := s.appendRevocationLocked(Revocation{GrantID: id, Reason: reason, At: now}); err != nil {
+		s.state = previous
 		return err
 	}
-	return s.persistLocked()
+	return s.persistOrRollbackLocked(previous)
 }
 
 func (s *Store) IssueCapability(subject, deviceID, session string, permission Permission, ttl time.Duration) (Capability, error) {
@@ -290,8 +323,9 @@ func (s *Store) IssueCapability(subject, deviceID, session string, permission Pe
 		return Capability{}, err
 	}
 	c := Capability{ID: id, Token: tok, Subject: subject, DeviceID: deviceID, Session: session, Permissions: []Permission{permission}, IssuedAt: now, ExpiresAt: now.Add(ttl)}
+	previous := cloneState(s.state)
 	s.state.Capabilities[id] = c
-	if err := s.persistLocked(); err != nil {
+	if err := s.persistOrRollbackLocked(previous); err != nil {
 		return Capability{}, err
 	}
 	return c, nil
@@ -322,6 +356,41 @@ func (s *Store) AuthenticateCapability(id, token string, permission Permission, 
 		return Capability{}, errors.New("capability grant is no longer active")
 	}
 	if err := validateCapabilityLocked(stored, permission, now); err != nil {
+		return Capability{}, err
+	}
+	stored.Permissions = append([]Permission(nil), stored.Permissions...)
+	return stored, nil
+}
+
+// RedeemCapability atomically marks a capability as used. The used marker is
+// part of durable policy state, so controller restarts cannot make a bearer
+// capability reusable.
+func (s *Store) RedeemCapability(id, token string, permission Permission, now time.Time) (Capability, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	stored, ok := s.state.Capabilities[id]
+	if !ok || stored.Token != token {
+		return Capability{}, errors.New("capability is unknown")
+	}
+	if stored.UsedAt != nil {
+		return Capability{}, errors.New("capability was already used")
+	}
+	for _, r := range s.state.Revocations {
+		if r.GrantID == "" && ((r.DeviceID != "" && r.DeviceID == stored.DeviceID) || (r.Subject != "" && r.Subject == stored.Subject)) {
+			return Capability{}, errors.New("capability has been revoked")
+		}
+	}
+	if err := s.authorizeLocked(stored.Subject, stored.DeviceID, stored.Session, permission, now); err != nil {
+		return Capability{}, errors.New("capability grant is no longer active")
+	}
+	if err := validateCapabilityLocked(stored, permission, now); err != nil {
+		return Capability{}, err
+	}
+	previous := cloneState(s.state)
+	usedAt := now.UTC()
+	stored.UsedAt = &usedAt
+	s.state.Capabilities[id] = stored
+	if err := s.persistOrRollbackLocked(previous); err != nil {
 		return Capability{}, err
 	}
 	stored.Permissions = append([]Permission(nil), stored.Permissions...)
@@ -361,8 +430,10 @@ func (s *Store) RevokeDevice(deviceID, reason string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	previous := cloneState(s.state)
 	now := time.Now().UTC()
 	if err := s.appendRevocationLocked(Revocation{DeviceID: deviceID, Reason: reason, At: now}); err != nil {
+		s.state = previous
 		return err
 	}
 	for id, c := range s.state.Capabilities {
@@ -371,7 +442,7 @@ func (s *Store) RevokeDevice(deviceID, reason string) error {
 			s.state.Capabilities[id] = c
 		}
 	}
-	return s.persistLocked()
+	return s.persistOrRollbackLocked(previous)
 }
 
 // RevokeSubject invalidates all capabilities issued to an account identity.
@@ -381,8 +452,10 @@ func (s *Store) RevokeSubject(subject, reason string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	previous := cloneState(s.state)
 	now := time.Now().UTC()
 	if err := s.appendRevocationLocked(Revocation{Subject: subject, Reason: reason, At: now}); err != nil {
+		s.state = previous
 		return err
 	}
 	for id, c := range s.state.Capabilities {
@@ -391,7 +464,7 @@ func (s *Store) RevokeSubject(subject, reason string) error {
 			s.state.Capabilities[id] = c
 		}
 	}
-	return s.persistLocked()
+	return s.persistOrRollbackLocked(previous)
 }
 
 func (s *Store) IsDeviceRevoked(deviceID string) bool {
@@ -423,8 +496,6 @@ func (s *Store) RevocationVersion() uint64 {
 }
 
 func (s *Store) appendRevocationLocked(r Revocation) error {
-	s.state.NextRevocation++
-	r.Version = s.state.NextRevocation
 	if r.ID == "" {
 		id, err := randomID("rev")
 		if err != nil {
@@ -432,6 +503,8 @@ func (s *Store) appendRevocationLocked(r Revocation) error {
 		}
 		r.ID = id
 	}
+	s.state.NextRevocation++
+	r.Version = s.state.NextRevocation
 	s.state.Revocations = append(s.state.Revocations, r)
 	return nil
 }
@@ -452,6 +525,7 @@ func (s *Store) RevocationsSince(version uint64) []Revocation {
 func (s *Store) ApplyRevocations(revs []Revocation) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	previous := cloneState(s.state)
 	seen := make(map[string]struct{}, len(s.state.Revocations))
 	for _, r := range s.state.Revocations {
 		if r.ID != "" {
@@ -468,6 +542,7 @@ func (s *Store) ApplyRevocations(revs []Revocation) error {
 			r.At = time.Now().UTC()
 		}
 		if err := s.appendRevocationLocked(r); err != nil {
+			s.state = previous
 			return err
 		}
 		if r.GrantID == "" && (r.DeviceID != "" || r.Subject != "") {
@@ -479,7 +554,7 @@ func (s *Store) ApplyRevocations(revs []Revocation) error {
 			}
 		}
 	}
-	return s.persistLocked()
+	return s.persistOrRollbackLocked(previous)
 }
 
 func (s *Store) AcquireLease(capability Capability, ttl time.Duration, now time.Time) (Lease, error) {
@@ -507,8 +582,9 @@ func (s *Store) AcquireLease(capability Capability, ttl time.Duration, now time.
 		return Lease{}, errors.New("control lease is held")
 	}
 	l := Lease{Session: capability.Session, Subject: capability.Subject, DeviceID: capability.DeviceID, Capability: capability.ID, AcquiredAt: now, ExpiresAt: now.Add(ttl)}
+	previous := cloneState(s.state)
 	s.state.Leases[l.Session] = l
-	if err := s.persistLocked(); err != nil {
+	if err := s.persistOrRollbackLocked(previous); err != nil {
 		return Lease{}, err
 	}
 	return l, nil
@@ -524,9 +600,10 @@ func (s *Store) RenewLease(session, subject, capabilityID string, ttl time.Durat
 	if ttl <= 0 {
 		return Lease{}, errors.New("lease ttl must be positive")
 	}
+	previous := cloneState(s.state)
 	l.ExpiresAt = now.Add(ttl)
 	s.state.Leases[session] = l
-	return l, s.persistLocked()
+	return l, s.persistOrRollbackLocked(previous)
 }
 func (s *Store) ReleaseLease(session, subject string) error {
 	s.mu.Lock()
@@ -538,12 +615,14 @@ func (s *Store) ReleaseLease(session, subject string) error {
 	if l.Subject != subject {
 		return errors.New("control lease is owned by another subject")
 	}
+	previous := cloneState(s.state)
 	delete(s.state.Leases, session)
-	return s.persistLocked()
+	return s.persistOrRollbackLocked(previous)
 }
 func (s *Store) ReapLeases(now time.Time) []Lease {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	previous := cloneState(s.state)
 	var expired []Lease
 	for k, l := range s.state.Leases {
 		if !now.Before(l.ExpiresAt) {
@@ -552,7 +631,9 @@ func (s *Store) ReapLeases(now time.Time) []Lease {
 		}
 	}
 	if len(expired) > 0 {
-		_ = s.persistLocked()
+		if err := s.persistOrRollbackLocked(previous); err != nil {
+			return nil
+		}
 	}
 	return expired
 }
@@ -573,8 +654,9 @@ func (s *Store) Audit(e AuditEvent) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	previous := cloneState(s.state)
 	s.state.Audit = append(s.state.Audit, e)
-	return s.persistLocked()
+	return s.persistOrRollbackLocked(previous)
 }
 func (s *Store) AuditEvents(limit int) []AuditEvent {
 	s.mu.RLock()

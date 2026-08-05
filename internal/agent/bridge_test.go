@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 	muxclient "github.com/pyrex41/shenmux/client"
@@ -20,6 +22,7 @@ import (
 type fakeSession struct {
 	events chan protocol.Message
 	closed bool
+	once   sync.Once
 }
 
 func (f *fakeSession) Attach(context.Context) (muxclient.Snapshot, error) {
@@ -41,7 +44,13 @@ func (f *fakeSession) ReleaseControl(context.Context) (protocol.Meta, error) {
 }
 func (f *fakeSession) Detach(context.Context) error    { return nil }
 func (f *fakeSession) Events() <-chan protocol.Message { return f.events }
-func (f *fakeSession) Close() error                    { f.closed = true; close(f.events); return nil }
+func (f *fakeSession) Close() error {
+	f.once.Do(func() {
+		f.closed = true
+		close(f.events)
+	})
+	return nil
+}
 
 func TestBridgeMultiplexesAttachToLocalSession(t *testing.T) {
 	fake := &fakeSession{events: make(chan protocol.Message)}
@@ -201,6 +210,102 @@ func TestBridgeBlindStreamEncryptsSessionFrames(t *testing.T) {
 	pongMsg, err := protocol.Decode(pongFrames)
 	if err != nil || pongMsg.Kind != protocol.KindPong {
 		t.Fatalf("blind pong message = %+v, %v", pongMsg, err)
+	}
+}
+
+func TestBridgeMalformedStreamDoesNotCloseTunnel(t *testing.T) {
+	bridge := NewBridge("device-1", nil)
+	bridge.OpenClient = func(context.Context, string) (sessionClient, error) {
+		return &fakeSession{events: make(chan protocol.Message)}, nil
+	}
+	server := httptest.NewServer(httpHandler(func(conn *websocket.Conn) {
+		_ = bridge.Serve(context.Background(), conn)
+	}))
+	defer server.Close()
+	endpoint, _ := url.Parse(server.URL)
+	endpoint.Scheme = "ws"
+	conn, _, err := websocket.DefaultDialer.Dial(endpoint.String(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	bad, _ := (relay.Envelope{Header: relay.Header{FrameType: relay.FrameSession, DeviceID: "device-1", SessionID: "shell", StreamID: "bad", Counter: 1}, Payload: []byte("not framed")}).Encode()
+	if err := conn.WriteMessage(websocket.BinaryMessage, bad); err != nil {
+		t.Fatal(err)
+	}
+	_, closedBytes, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed, err := relay.Decode(closedBytes)
+	if err != nil || closed.Header.FrameType != relay.FrameClose || closed.Header.StreamID != "bad" {
+		t.Fatalf("bad stream response = %+v, %v", closed.Header, err)
+	}
+
+	frames, _ := protocol.Encode(protocol.Message{Kind: protocol.KindAttach, Meta: protocol.Meta{Version: protocol.Version, Session: "shell"}})
+	payload, _ := relay.MarshalFrames(frames)
+	good, _ := (relay.Envelope{Header: relay.Header{FrameType: relay.FrameSession, DeviceID: "device-1", SessionID: "shell", StreamID: "good", Counter: 1}, Payload: payload}).Encode()
+	if err := conn.WriteMessage(websocket.BinaryMessage, good); err != nil {
+		t.Fatal(err)
+	}
+	_, attachedBytes, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("tunnel died with malformed peer stream: %v", err)
+	}
+	_, attached, err := relay.DecodeMessage(attachedBytes)
+	if err != nil || attached.Kind != protocol.KindAttached {
+		t.Fatalf("good stream response = %+v, %v", attached, err)
+	}
+}
+
+func TestBridgeServeExitClosesEveryLocalStream(t *testing.T) {
+	bridge := NewBridge("device-1", nil)
+	var sessions []*fakeSession
+	bridge.OpenClient = func(context.Context, string) (sessionClient, error) {
+		fake := &fakeSession{events: make(chan protocol.Message)}
+		sessions = append(sessions, fake)
+		return fake, nil
+	}
+	done := make(chan struct{})
+	server := httptest.NewServer(httpHandler(func(conn *websocket.Conn) {
+		_ = bridge.Serve(context.Background(), conn)
+		close(done)
+	}))
+	defer server.Close()
+	endpoint, _ := url.Parse(server.URL)
+	endpoint.Scheme = "ws"
+	conn, _, err := websocket.DefaultDialer.Dial(endpoint.String(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames, _ := protocol.Encode(protocol.Message{Kind: protocol.KindAttach, Meta: protocol.Meta{Version: protocol.Version, Session: "shell"}})
+	payload, _ := relay.MarshalFrames(frames)
+	for _, streamID := range []string{"one", "two"} {
+		data, _ := (relay.Envelope{Header: relay.Header{FrameType: relay.FrameSession, DeviceID: "device-1", SessionID: "shell", StreamID: streamID, Counter: 1}, Payload: payload}).Encode()
+		if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := conn.ReadMessage(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = conn.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("bridge did not exit after tunnel close")
+	}
+	if len(sessions) != 2 || !sessions[0].closed || !sessions[1].closed {
+		t.Fatalf("local streams not closed on exit: %#v", sessions)
+	}
+}
+
+func TestLocalClientIDIsUniquePerStream(t *testing.T) {
+	one := localClientID("device", "shell", "one")
+	two := localClientID("device", "shell", "two")
+	if one == two || one == "" || two == "" {
+		t.Fatalf("local client IDs = %q and %q", one, two)
 	}
 }
 

@@ -1,12 +1,17 @@
 # Deployment examples
 
-`systemd/shenmux-agent.service` is the shared service contract for EC2,
-Hetzner, and home servers. Set `SHENMUX_CONTROLLER` in a root-readable
-environment file, enroll once, and persist `/var/lib/shenmux`.
+These files illustrate intended process shapes; they are not a supported or
+tested distribution.
 
-`fly.toml.example` is an egress-only Fly Machine template. It mounts a volume
-for the device identity and deliberately publishes no agent ports.
+- `systemd/` sketches separate controller and outbound-agent services.
+- `fly.toml.example` sketches an egress-only agent with durable state.
+- `kubernetes/` sketches a controller and an agent sidecar sharing local IPC
+  with a separately running session daemon.
 
-The controller remains the only public HTTPS/WSS service. See
-[`docs/DEPLOYMENT.md`](../docs/DEPLOYMENT.md) for firewall, storage, and
-outage/reconnect requirements.
+They assume an image containing the `shenmux` binary, real TLS and browser
+identity integration, corrected durable state paths, and an enrollment
+workflow. The root `Dockerfile` currently builds only the legacy `muxd` image,
+so it cannot run these controller/agent examples.
+
+Review the limitations and production checklist in
+[`docs/DEPLOYMENT.md`](../docs/DEPLOYMENT.md) before adapting any file.
