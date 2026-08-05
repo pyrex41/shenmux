@@ -26,7 +26,7 @@ This repository implements the terminal multiplexer described by the project not
 2. **XPUB replaces PUB.** XPUB lets the daemon observe the client's unique readiness subscription and avoid the normal PUB/SUB slow-joiner loss during attach.
 3. **One sequence covers all observable state changes.** PTY bytes, authoritative resize, and child exit share the same monotonic sequence.
 4. **Snapshots use ordered replay today.** The inspected public Ghostty C API supports terminal construction, VT writes, resize, and state reads, but no stable full-terminal export/import facility was available. The snapshot codec is therefore replaceable without pretending that an unavailable native serializer exists.
-5. **ZMQ remains a Go impure edge.** A minimal Cgo binding uses the stable libzmq C ABI and does not require ZeroMQ headers on Linux. Shen does not execute on the byte hot path.
+5. **Messaging is a pure-Go edge.** The local adapter speaks ZMTP 3.1 through `github.com/tomi77/zmq4`; no libzmq headers, shared library, or CGO are required. Shen does not execute on the byte hot path.
 6. **Filesystem IPC ownership is race-safe.** Default sockets live in a verified owner-only per-UID directory, and persistent `0600` advisory lock sentinels are acquired before stale socket removal or bind.
 
 ## Verification performed
@@ -51,7 +51,7 @@ The generated guard package matched `specs/mux.shen` at SHA-256:
 87b2e9bf58803aea0a0f135ba964fd5f54af54322f641345788716abfb09014d
 ```
 
-The test suite includes unit coverage for guarded transitions, protocol framing, snapshot limits, the PTY, the headerless ZeroMQ binding, endpoint validation and ownership locks, cancellation/reaping, actor shutdown, and client behavior. Its integration test launches `/bin/sh` under `openpty`, attaches a real DEALER/SUB client over filesystem IPC, writes through ROUTER, receives ordered output over XPUB, and observes process exit.
+The test suite includes unit coverage for guarded transitions, protocol framing, snapshot limits, the PTY, the pure-Go ZMTP adapter, endpoint validation and ownership locks, cancellation/reaping, actor shutdown, and client behavior. Its integration test launches `/bin/sh` under a pure-Go PTY, attaches a real DEALER/SUB client over filesystem IPC, writes through ROUTER, receives ordered output over XPUB, and observes process exit.
 
 ## Standalone binary smoke test
 
@@ -80,12 +80,12 @@ The duplicate daemon failed before disturbing the live endpoints.
 
 ```text
 OS:       Linux 6.12.13 x86-64
-Go:       go1.23.2 linux/amd64
-Cgo:      enabled
-libzmq:   4.3.5, SONAME libzmq.so.5
+Go:       go1.26.x linux/amd64
+Cgo:      disabled for the default runtime
+ZeroMQ:   ZMTP 3.1 via github.com/tomi77/zmq4
 ```
 
-The Linux binaries are dynamically linked and require a compatible glibc system plus `libzmq.so.5` and its runtime dependencies.
+The default Linux binaries do not require `libzmq.so`, a C toolchain, or CGO at runtime. A compatible glibc system is still required for the normal Go toolchain target.
 
 ## Wired but not executable in this environment
 
@@ -108,10 +108,10 @@ The `libghostty` build-tag adapter is included, but the environment had no Ghost
 
 ## Reproduction
 
-On Debian or Ubuntu:
+On Debian or Ubuntu, install Go 1.26, Node/npm, and the usual build tools
+using your preferred package manager, then run:
 
 ```sh
-sudo apt-get install libzmq5 build-essential
 make check
 make race
 make build

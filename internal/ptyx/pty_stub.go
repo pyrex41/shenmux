@@ -1,4 +1,4 @@
-//go:build !cgo || (!linux && !darwin)
+//go:build !linux && !darwin
 
 package ptyx
 
@@ -9,7 +9,7 @@ import (
 	"github.com/pyrex41/shenmux/internal/shenguard"
 )
 
-var ErrUnsupported = errors.New("PTY support requires cgo on Linux or macOS")
+var ErrUnsupported = errors.New("PTY support is unavailable on this operating system")
 
 type PTY struct{}
 

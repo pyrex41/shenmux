@@ -1,4 +1,4 @@
-//go:build cgo && (linux || darwin)
+//go:build linux || darwin
 
 package server
 
@@ -14,7 +14,12 @@ import (
 )
 
 func TestServeCancellationStopsAndReapsPTY(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "ipc")
+	dir, err := os.MkdirTemp("/tmp", "shenmux-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	dir = filepath.Join(dir, "ipc")
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}

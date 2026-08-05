@@ -25,9 +25,9 @@ session's local IPC endpoints.
 
 ## Build
 
-The supported runtime platforms are Linux and macOS with Go 1.23+, a C
-toolchain, and libzmq 4.x. The Nix development shell supplies these
-dependencies.
+The supported runtime platforms are Linux and macOS with Go 1.26+. The
+default runtime is pure Go: it does not require a C toolchain, libzmq, or
+CGO. The Nix development shell supplies Go and the other development tools.
 
 ```sh
 nix develop
@@ -35,9 +35,9 @@ make build
 ```
 
 This creates `bin/shenmux`, `bin/muxd`, `bin/muxctl`, and
-`bin/shenmux-web`. `CGO_ENABLED=0` builds are useful as a portability check,
-but PTY and ZeroMQ operations deliberately return unsupported errors in those
-builds. Windows PTY support is not implemented.
+`bin/shenmux-web`. The PTY layer uses `creack/pty`, and the local messaging
+layer speaks ZMTP through `github.com/tomi77/zmq4`; both work with
+`CGO_ENABLED=0`. Windows PTY support is not implemented.
 
 ## Quick start: local
 
@@ -218,11 +218,13 @@ nix develop --command make race
 ```
 
 `make check` rebuilds the web bundle, checks generated Shen guards, runs the
-Shen verification gate, Go tests and vet, and both Cgo and no-Cgo builds.
+Shen verification gate, Go tests and vet, and both native and CGO-disabled
+builds.
 `make race` runs the Go race detector. Focused targets are `make test-relay`
 and `make test-deploy`; the latter is currently a compile check, not an
 end-to-end deployment test.
 
-The optional `libghostty-vt` adapter requires compatible headers and a library
-and is selected with `-tags libghostty`. The default build uses the basic Go
-terminal implementation.
+The optional `libghostty-vt` adapter requires compatible headers, a library,
+and CGO; select it with `-tags libghostty`. The default build uses the basic
+Go terminal implementation and remains CGO-free. Running the terminal in
+Ghostty is therefore an opt-in build choice, not a runtime dependency.

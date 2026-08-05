@@ -1,15 +1,14 @@
-FROM golang:1.23-bookworm AS build
+FROM golang:1.26-bookworm AS build
 WORKDIR /src
-RUN apt-get update && apt-get install -y --no-install-recommends libzmq3-dev && rm -rf /var/lib/apt/lists/*
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=1 go build -trimpath -ldflags='-s -w' -o /out/shenmux ./cmd/shenmux
-RUN CGO_ENABLED=1 go build -trimpath -ldflags='-s -w' -o /out/muxd ./cmd/muxd
-RUN CGO_ENABLED=1 go build -trimpath -ldflags='-s -w' -o /out/muxctl ./cmd/muxctl
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/shenmux ./cmd/shenmux
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/muxd ./cmd/muxd
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/muxctl ./cmd/muxctl
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libzmq5 bash bash-completion curl git && \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates bash bash-completion curl git && \
     curl -fsSL https://starship.rs/install.sh | sh -s -- -y -b /usr/local/bin && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/shenmux /usr/local/bin/shenmux

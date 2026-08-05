@@ -1,19 +1,15 @@
-FROM golang:1.23-bookworm AS build
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends libzmq3-dev \
-    && rm -rf /var/lib/apt/lists/*
+FROM golang:1.26-bookworm AS build
 
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod go.sum ./
 COPY . .
 
-RUN CGO_ENABLED=1 go build -trimpath -ldflags='-s -w' -o /out/muxd ./cmd/muxd
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/muxd ./cmd/muxd
 
 FROM debian:bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bash ca-certificates fish libzmq5 zsh \
+    && apt-get install -y --no-install-recommends bash ca-certificates fish zsh \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /out/muxd /usr/local/bin/muxd

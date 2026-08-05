@@ -1,4 +1,4 @@
-//go:build cgo && (linux || darwin)
+//go:build linux || darwin
 
 package server
 

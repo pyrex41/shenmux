@@ -1,10 +1,10 @@
-//go:build !cgo || (!linux && !darwin)
+//go:build !linux && !darwin
 
 package ttyx
 
 import "errors"
 
-var ErrUnsupported = errors.New("terminal raw mode requires cgo on Linux or macOS")
+var ErrUnsupported = errors.New("terminal raw mode is unavailable on this operating system")
 
 type State struct{}
 

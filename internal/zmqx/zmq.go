@@ -1,0 +1,450 @@
+// Package zmqx exposes the small ZeroMQ surface used by shenmux.
+//
+// The implementation is pure Go and speaks ZMTP 3.1 through tomi77/zmq4.
+// Keeping this adapter local lets the session/client code retain its existing
+// multipart API while the project remains free of a libzmq or CGO runtime
+// dependency.
+package zmqx
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+
+	zmq "github.com/tomi77/zmq4"
+)
+
+type SocketType int
+
+const (
+	Pair SocketType = iota
+	Pub
+	Sub
+	_ // req
+	_ // rep
+	Dealer
+	Router
+	Pull
+	Push
+	XPub
+)
+
+const (
+	DontWait = 1
+	SndMore  = 2
+)
+
+// These values retain the stable libzmq option numbers used by the callers.
+// The pure-Go adapter translates the options that affect shenmux behavior and
+// enforces receive message-size limits locally. Linger, timeout, immediate, and XPUB
+// verbose are harmless compatibility no-ops because the underlying API uses
+// contexts and explicit close semantics.
+const (
+	Identity    = 5
+	Subscribe   = 6
+	Unsubscribe = 7
+	RcvMore     = 13
+	Linger      = 17
+	MaxMsgSize  = 22
+	SndHWM      = 23
+	RcvHWM      = 24
+	RcvTimeout  = 27
+	SndTimeout  = 28
+	Immediate   = 39
+	XPubVerbose = 40
+)
+
+const (
+	defaultMaxFrame  = 256 << 20
+	defaultMaxFrames = 16
+)
+
+var (
+	ErrWouldBlock = errors.New("zmq operation would block")
+	ErrClosed     = errors.New("zmq object is closed")
+)
+
+type Context struct {
+	mu      sync.Mutex
+	ctx     context.Context
+	cancel  context.CancelFunc
+	sockets map[*Socket]struct{}
+	closed  bool
+}
+
+func NewContext() (*Context, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Context{ctx: ctx, cancel: cancel, sockets: make(map[*Socket]struct{})}, nil
+}
+
+func (c *Context) Socket(kind SocketType) (*Socket, error) {
+	if c == nil {
+		return nil, ErrClosed
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil, ErrClosed
+	}
+	s := &Socket{ctx: c, kind: kind, maxFrame: defaultMaxFrame}
+	c.sockets[s] = struct{}{}
+	return s, nil
+}
+
+// Shutdown cancels operations using this context without eagerly closing the
+// sockets. Callers normally close sockets and then Close the context.
+func (c *Context) Shutdown() error {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.closed {
+		c.cancel()
+	}
+	return nil
+}
+
+func (c *Context) Close() error {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil
+	}
+	c.closed = true
+	c.cancel()
+	sockets := make([]*Socket, 0, len(c.sockets))
+	for s := range c.sockets {
+		sockets = append(sockets, s)
+	}
+	c.mu.Unlock()
+	for _, s := range sockets {
+		_ = s.Close()
+	}
+	return nil
+}
+
+type rawSocket interface {
+	Bind(context.Context, string) error
+	Connect(context.Context, string) error
+	Close() error
+}
+
+type rawSender interface {
+	Send(context.Context, zmq.Message) error
+}
+
+type rawReceiver interface {
+	Recv(context.Context) (zmq.Message, error)
+}
+
+type Socket struct {
+	mu       sync.Mutex
+	ctx      *Context
+	kind     SocketType
+	raw      rawSocket
+	closed   bool
+	identity []byte
+	sndHWM   int
+	rcvHWM   int
+	maxFrame int
+	subs     []struct {
+		topic string
+		add   bool
+	}
+}
+
+func (s *Socket) ensureRaw() (rawSocket, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.ctx == nil {
+		return nil, ErrClosed
+	}
+	if s.raw != nil {
+		return s.raw, nil
+	}
+	opts := make([]zmq.Option, 0, 3)
+	if len(s.identity) > 0 {
+		opts = append(opts, zmq.WithIdentity(s.identity))
+	}
+	if s.sndHWM > 0 {
+		opts = append(opts, zmq.WithSndHWM(s.sndHWM))
+	}
+	if s.rcvHWM > 0 {
+		opts = append(opts, zmq.WithRcvHWM(s.rcvHWM))
+	}
+	switch s.kind {
+	case Pair:
+		s.raw = zmq.NewPAIR(opts...)
+	case Pub:
+		s.raw = zmq.NewPUB(opts...)
+	case Sub:
+		s.raw = zmq.NewSUB(opts...)
+	case Dealer:
+		s.raw = zmq.NewDEALER(opts...)
+	case Router:
+		s.raw = zmq.NewROUTER(opts...)
+	case Pull:
+		s.raw = zmq.NewPULL(opts...)
+	case Push:
+		s.raw = zmq.NewPUSH(opts...)
+	case XPub:
+		s.raw = zmq.NewXPUB(opts...)
+	default:
+		return nil, fmt.Errorf("unsupported ZeroMQ socket type %d", s.kind)
+	}
+	if sub, ok := s.raw.(*zmq.SUB); ok {
+		for _, entry := range s.subs {
+			var err error
+			if entry.add {
+				err = sub.Subscribe(entry.topic)
+			} else {
+				err = sub.Unsubscribe(entry.topic)
+			}
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	return s.raw, nil
+}
+
+func (s *Socket) Bind(endpoint string) error {
+	raw, err := s.ensureRaw()
+	if err != nil {
+		return err
+	}
+	return raw.Bind(s.ctx.ctx, endpoint)
+}
+
+func (s *Socket) Connect(endpoint string) error {
+	raw, err := s.ensureRaw()
+	if err != nil {
+		return err
+	}
+	return raw.Connect(s.ctx.ctx, endpoint)
+}
+
+func (s *Socket) SetInt(option, value int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ErrClosed
+	}
+	if s.raw != nil && option != Linger && option != RcvTimeout && option != SndTimeout && option != Immediate && option != XPubVerbose {
+		return errors.New("zmq socket options must be set before bind or connect")
+	}
+	switch option {
+	case SndHWM:
+		if value <= 0 {
+			return errors.New("zmq send HWM must be positive")
+		}
+		s.sndHWM = value
+	case RcvHWM:
+		if value <= 0 {
+			return errors.New("zmq receive HWM must be positive")
+		}
+		s.rcvHWM = value
+	case Linger, RcvTimeout, SndTimeout, Immediate, XPubVerbose:
+		// Context cancellation and explicit close provide these semantics.
+	default:
+		return fmt.Errorf("unsupported ZeroMQ integer option %d", option)
+	}
+	return nil
+}
+
+func (s *Socket) SetInt64(option int, value int64) error {
+	if option != MaxMsgSize {
+		return fmt.Errorf("unsupported ZeroMQ int64 option %d", option)
+	}
+	if value <= 0 || value > int64(defaultMaxFrame) {
+		return errors.New("zmq maximum message size is out of range")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ErrClosed
+	}
+	s.maxFrame = int(value)
+	return nil
+}
+
+func (s *Socket) SetBytes(option int, value []byte) error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrClosed
+	}
+	switch option {
+	case Identity:
+		if len(value) == 0 || len(value) > 255 {
+			s.mu.Unlock()
+			return errors.New("zmq identity must contain 1..255 bytes")
+		}
+		if s.raw != nil {
+			s.mu.Unlock()
+			return errors.New("zmq identity must be set before bind or connect")
+		}
+		s.identity = append([]byte(nil), value...)
+		s.mu.Unlock()
+		return nil
+	case Subscribe, Unsubscribe:
+		if s.kind != Sub {
+			s.mu.Unlock()
+			return fmt.Errorf("ZeroMQ option %d requires a SUB socket", option)
+		}
+		s.subs = append(s.subs, struct {
+			topic string
+			add   bool
+		}{topic: string(value), add: option == Subscribe})
+		raw := s.raw
+		s.mu.Unlock()
+		if raw == nil {
+			return nil
+		}
+		sub := raw.(*zmq.SUB)
+		if option == Subscribe {
+			return sub.Subscribe(string(value))
+		}
+		return sub.Unsubscribe(string(value))
+	default:
+		s.mu.Unlock()
+		return fmt.Errorf("unsupported ZeroMQ byte option %d", option)
+	}
+}
+
+func (s *Socket) SendMultipart(frames [][]byte, flags int) error {
+	return s.SendMultipartContext(s.ctx.ctx, frames, flags)
+}
+
+// SendMultipartContext is SendMultipart with a caller-controlled cancellation
+// context. It is important for DEALER sockets, whose pure-Go implementation
+// waits for a route to become available when the peer has disconnected.
+func (s *Socket) SendMultipartContext(ctx context.Context, frames [][]byte, flags int) error {
+	if len(frames) == 0 {
+		return errors.New("zmq multipart message needs at least one frame")
+	}
+	if flags&^SndMore != 0 {
+		return fmt.Errorf("unsupported ZeroMQ send flags %d", flags)
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrClosed
+	}
+	s.mu.Unlock()
+	raw, err := s.ensureRaw()
+	if err != nil {
+		return err
+	}
+	sender, ok := raw.(rawSender)
+	if !ok {
+		return fmt.Errorf("ZeroMQ socket type %d cannot send", s.kind)
+	}
+	msg := make(zmq.Message, len(frames))
+	for i, frame := range frames {
+		msg[i] = append([]byte(nil), frame...)
+	}
+	if ctx == nil {
+		ctx = s.ctx.ctx
+	}
+	if err := sender.Send(ctx, msg); err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
+func (s *Socket) RecvMultipart(flags int) ([][]byte, error) {
+	return s.RecvMultipartLimit(flags, defaultMaxFrame, defaultMaxFrames)
+}
+
+func (s *Socket) RecvMultipartLimit(flags, maxFrame, maxFrames int) ([][]byte, error) {
+	if maxFrame <= 0 || maxFrames <= 0 {
+		return nil, errors.New("zmq receive limits must be positive")
+	}
+	if flags&^DontWait != 0 {
+		return nil, fmt.Errorf("unsupported ZeroMQ receive flags %d", flags)
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil, ErrClosed
+	}
+	if s.maxFrame < maxFrame {
+		maxFrame = s.maxFrame
+	}
+	s.mu.Unlock()
+	raw, err := s.ensureRaw()
+	if err != nil {
+		return nil, err
+	}
+	receiver, ok := raw.(rawReceiver)
+	if !ok {
+		return nil, fmt.Errorf("ZeroMQ socket type %d cannot receive", s.kind)
+	}
+	recvCtx := s.ctx.ctx
+	var cancel context.CancelFunc
+	if flags&DontWait != 0 {
+		recvCtx, cancel = context.WithTimeout(recvCtx, 0)
+		defer cancel()
+	}
+	msg, err := receiver.Recv(recvCtx)
+	if err != nil {
+		if flags&DontWait != 0 && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) {
+			return nil, ErrWouldBlock
+		}
+		return nil, mapError(err)
+	}
+	if len(msg) > maxFrames {
+		return nil, fmt.Errorf("zmq multipart message exceeds %d frames", maxFrames)
+	}
+	frames := make([][]byte, len(msg))
+	for i, frame := range msg {
+		if len(frame) > maxFrame {
+			return nil, fmt.Errorf("zmq frame size %d exceeds limit %d", len(frame), maxFrame)
+		}
+		frames[i] = append([]byte(nil), frame...)
+	}
+	return frames, nil
+}
+
+func (s *Socket) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
+	raw := s.raw
+	s.raw = nil
+	s.mu.Unlock()
+	if s.ctx != nil {
+		s.ctx.mu.Lock()
+		delete(s.ctx.sockets, s)
+		s.ctx.mu.Unlock()
+	}
+	if raw == nil {
+		return nil
+	}
+	if err := raw.Close(); err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
+func mapError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, zmq.ErrClosed) || errors.Is(err, context.Canceled) {
+		return ErrClosed
+	}
+	return err
+}

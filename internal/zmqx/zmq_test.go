@@ -1,4 +1,4 @@
-//go:build cgo && (linux || darwin)
+//go:build linux || darwin
 
 package zmqx
 
@@ -70,5 +70,53 @@ func TestNonblockingReceive(t *testing.T) {
 	defer socket.Close()
 	if _, err := socket.RecvMultipart(DontWait); !errors.Is(err, ErrWouldBlock) {
 		t.Fatalf("got %v, want ErrWouldBlock", err)
+	}
+}
+
+func TestRouterDealerRoundTrip(t *testing.T) {
+	ctx, err := NewContext()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ctx.Close()
+	router, err := ctx.Socket(Router)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer router.Close()
+	dealer, err := ctx.Socket(Dealer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dealer.Close()
+	if err := dealer.SetBytes(Identity, []byte("adapter-client")); err != nil {
+		t.Fatal(err)
+	}
+	endpoint := fmt.Sprintf("ipc:///tmp/shenmux-zmq-test-%d.sock", time.Now().UnixNano())
+	if err := router.Bind(endpoint); err != nil {
+		t.Fatal(err)
+	}
+	if err := dealer.Connect(endpoint); err != nil {
+		t.Fatal(err)
+	}
+	if err := dealer.SendMultipart([][]byte{[]byte("request")}, 0); err != nil {
+		t.Fatal(err)
+	}
+	frames, err := router.RecvMultipart(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(frames) != 2 || string(frames[0]) != "adapter-client" || string(frames[1]) != "request" {
+		t.Fatalf("router frames = %#v", frames)
+	}
+	if err := router.SendMultipart([][]byte{frames[0], []byte("response")}, 0); err != nil {
+		t.Fatal(err)
+	}
+	frames, err = dealer.RecvMultipart(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(frames) != 1 || string(frames[0]) != "response" {
+		t.Fatalf("dealer frames = %#v", frames)
 	}
 }
