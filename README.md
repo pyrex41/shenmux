@@ -4,7 +4,7 @@ A Shen-controlled terminal session multiplexer with a Go host runtime, a real Un
 
 The design has one authoritative process and PTY writer, many attached readers, a targeted snapshot followed by an ordered broadcast stream, and a single sequence spanning PTY output, resizes, and process exit. Shen owns the pure control-plane reducer: it validates commands, evolves session state, returns rejection reasons, and describes effects. Go owns the impure edges (PTY, terminal, ZeroMQ, clocks, persistence, and effect execution).
 
-> Status: V2 relay and transport foundations are implemented. The daemon/client, PTY, local IPC, authenticated enrollment, reconnecting agent tunnel, browser capability endpoint, blind relay framing, policy/revocation metadata, and direct Tailscale/WireGuard path selection are covered by tests. The optional `libghostty-vt` adapter is present but was not linked in this build environment.
+> Status: V2 relay and transport support is implemented. The daemon/client, PTY, local IPC, authenticated enrollment, reconnecting agent tunnel, browser capability endpoint, blind end-to-end stream integration, durable policy/enrollment state, revocation metadata, and direct Tailscale/WireGuard path selection are covered by tests. The optional `libghostty-vt` adapter is present but was not linked in this build environment.
 
 ## Architecture
 
@@ -60,13 +60,15 @@ the XDG config file (or supplied with `SHENMUX_TRANSPORT` and
 `SHENMUX_DIRECT_ENDPOINT`). No inbound public port is needed for relay mode;
 tailnet mode requires the local Tailscale/WireGuard service and a peer address.
 
-V2 relay primitives are implemented in `internal/relay`: blind per-stream
+V2 relay support is implemented in `internal/relay`: blind per-stream
 X25519/Ed25519 key confirmation, AES-GCM payload protection, replay and
-downgrade checks, and authenticated key rotation. `internal/policy` provides
-durable ACL/capability/control-lease/revocation/audit metadata, while
-`internal/transport` selects a healthy direct path with relay fallback and
-`internal/update` verifies signed update manifests. These are transport and
-policy foundations; local-first leadership and PTY handoff remain future work.
+downgrade checks, authenticated key rotation, and encrypted agent-bridge
+frames. `internal/policy` provides durable ACL/capability/control-lease/
+revocation/audit metadata, and controller enrollment/device credentials are
+persisted under the controller state directory. `internal/transport` selects
+a healthy direct path with relay fallback, while `internal/update` verifies
+signed update manifests. Local-first leadership and PTY handoff remain future
+work.
 
 ### Remote/self-hosted setup
 
@@ -74,8 +76,14 @@ The controller command is a small development/self-hosted endpoint. It prints
 a single-use enrollment code when it starts:
 
 ```sh
-shenmux controller --listen 127.0.0.1:8788 --origin https://controller.example
+shenmux controller --listen 127.0.0.1:8788 \
+  --origin https://controller.example \
+  --state-dir /var/lib/shenmux-controller
 ```
+
+The controller state directory contains owner-only enrollment/device
+credentials and policy state and should live on durable storage. The
+`deploy/systemd/shenmux-controller.service` unit passes this path explicitly.
 
 For a remote deployment, place the controller behind a TLS reverse proxy and
 publish only HTTPS/WSS. The built-in listener is plain HTTP for local
@@ -86,6 +94,21 @@ automatically upgrade the relay connection to WSS:
 shenmux login --controller https://controller.example --code CODE_FROM_CONTROLLER
 shenmux agent --controller https://controller.example --transport relay
 ```
+
+To require blind relay content protection, save the minimum trust mode during
+enrollment and start the agent with the same state directory:
+
+```sh
+shenmux login --controller https://controller.example --code CODE \
+  --trust-mode blind
+shenmux agent --controller https://controller.example --transport relay \
+  --state-dir /var/lib/shenmux
+```
+
+Blind streams authenticate an ephemeral X25519 key exchange with the enrolled
+agent Ed25519 key; the relay routes ciphertext and cannot inspect terminal or
+input payloads. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for Fly, AWS,
+Hetzner, home-server, service-manager, backup, and controller-state guidance.
 
 The agent persists its device key, token, controller, and transport preference
 in the XDG state/config directories. It needs only outbound HTTPS/DNS access

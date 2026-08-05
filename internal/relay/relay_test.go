@@ -6,9 +6,13 @@ import (
 	"crypto/ed25519"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -49,6 +53,43 @@ func TestEnvelopeMessageRoundTripPreservesFrames(t *testing.T) {
 		if !bytes.Equal(frames[i], decodedFrames[i]) {
 			t.Fatalf("frame %d changed", i)
 		}
+	}
+}
+
+func TestPersistentEnrollmentStoreSurvivesRestart(t *testing.T) {
+	path := t.TempDir() + "/enrollment.json"
+	store, err := NewPersistentEnrollmentStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, err := store.Create(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, _, err := GenerateDeviceKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential, err := store.Consume(code, pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewPersistentEnrollmentStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reopened.authenticate(credential.DeviceID, credential.Token); !ok {
+		t.Fatal("device credential was not persisted")
+	}
+	if _, err := reopened.Consume(code, pub); err == nil {
+		t.Fatal("consumed enrollment code was reusable after restart")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("enrollment file permissions = %o, want 600", info.Mode().Perm())
 	}
 }
 
@@ -143,6 +184,15 @@ func TestBackoffAndReconnectState(t *testing.T) {
 	}
 }
 
+func TestBackoffJitterRemainsBounded(t *testing.T) {
+	p := BackoffPolicy{Initial: time.Second, Maximum: 2 * time.Second, Factor: 2, Jitter: 1, Rand: rand.New(rand.NewSource(1))}
+	for i := 0; i < 32; i++ {
+		if got := p.Delay(3); got < 0 || got > p.Maximum {
+			t.Fatalf("jittered delay escaped bounds: %v", got)
+		}
+	}
+}
+
 func TestAuthenticatedTunnelEnrollmentAndHandshake(t *testing.T) {
 	store := NewEnrollmentStore()
 	code, err := store.Create(time.Minute)
@@ -203,6 +253,65 @@ func TestAuthenticatedTunnelEnrollmentAndHandshake(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("replayed enrollment status %d", resp.StatusCode)
+	}
+}
+
+func TestTunnelRunRecoversAfterControllerOutage(t *testing.T) {
+	store := NewEnrollmentStore()
+	code, err := store.Create(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := NewController(store, "outage-controller")
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/ws" {
+			// Simulate a short controller outage before the endpoint becomes
+			// reachable. WebSocket clients observe these as dial failures.
+			if attempts.Add(1) <= 2 {
+				http.Error(w, "controller unavailable", http.StatusServiceUnavailable)
+				return
+			}
+		}
+		controller.ServeHTTP(w, r)
+	}))
+	defer server.Close()
+
+	pub, priv, err := GenerateDeviceKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(EnrollmentRequest{Code: code, PublicKey: pub})
+	resp, err := http.Post(server.URL+"/enroll", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var credential DeviceCredential
+	if err := json.NewDecoder(resp.Body).Decode(&credential); err != nil {
+		t.Fatal(err)
+	}
+	wsURL, _ := url.Parse(server.URL)
+	wsURL.Scheme = "ws"
+	tunnel := Tunnel{URL: wsURL.String() + "/ws", Origin: "outage-controller", Credential: credential, PrivateKey: priv,
+		Policy: BackoffPolicy{Initial: 5 * time.Millisecond, Maximum: 20 * time.Millisecond, Factor: 2}}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var connected atomic.Int32
+	err = tunnel.Run(ctx, func(conn *websocket.Conn) error {
+		if connected.Add(1) == 1 {
+			return errors.New("force reconnect")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := attempts.Load(); got < 4 {
+		t.Fatalf("expected outage retries then recovery, dial attempts=%d", got)
+	}
+	if got := connected.Load(); got != 2 {
+		t.Fatalf("expected two authenticated connections, got %d", got)
 	}
 }
 

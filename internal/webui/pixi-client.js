@@ -37,6 +37,10 @@ import Shen from "shen-script";
   let scrollPixels = 0;
   let rendererWidth = 0;
   let rendererHeight = 0;
+  // Reconnects always begin with a fresh checkpoint. Keep the previous view
+  // visible while offline, but never apply deltas from the old stream to it.
+  let reconnectTimer;
+  let reconnectDelay = 250;
 
   const setStatus = (text, good = false) => {
     status.textContent = text;
@@ -456,13 +460,23 @@ import Shen from "shen-script";
     }, { passive: false });
     const scheme = location.protocol === "https:" ? "wss" : "ws";
     const connect = () => {
+      reconnectTimer = undefined;
       socket = new WebSocket(`${scheme}://${location.host}/ws`);
-      socket.onopen = () => { setStatus(shen ? "connected · shen · pixi" : "connected · pixi", true); app.canvas.focus(); };
+      socket.onopen = () => {
+        reconnectDelay = 250;
+        setStatus(shen ? "connected · shen · pixi" : "connected · pixi", true);
+        app.canvas.focus();
+      };
       socket.onmessage = (event) => {
         try { onMessage(JSON.parse(event.data)); }
         catch (error) { setStatus(`render error · ${error.message}`); console.error(error); }
       };
-      socket.onclose = () => { setStatus("disconnected · retrying"); setTimeout(connect, 1000); };
+      socket.onclose = () => {
+        setStatus("disconnected · retrying");
+        if (reconnectTimer) return;
+        reconnectTimer = setTimeout(connect, reconnectDelay);
+        reconnectDelay = Math.min(5000, reconnectDelay * 2);
+      };
       socket.onerror = () => setStatus("connection error");
     };
     connect();

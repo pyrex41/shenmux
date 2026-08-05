@@ -52,6 +52,9 @@ func TestRoundTripAndPrivatePermissions(t *testing.T) {
 	if loaded.Controller != config.Controller || loaded.Version != SchemaVersion || loaded.TrustMode != "trusted" || loaded.Transport != "tailscale" || loaded.DirectEndpoint == "" {
 		t.Fatalf("loaded config = %+v", loaded)
 	}
+	if loaded.ReconnectInitial != "1s" || loaded.ReconnectMaximum != "1m" || loaded.ReconnectFactor != 2 || loaded.ReconnectJitter != .2 {
+		t.Fatalf("reconnect defaults = %+v", loaded)
+	}
 	now := time.Now().UTC().Truncate(time.Second)
 	state := State{Sessions: map[string]Session{"work": {Name: "work", StartedAt: now, PID: 42}}}
 	if err := paths.SaveState(state); err != nil {
@@ -91,5 +94,21 @@ func TestRejectsUnknownAndFutureSchema(t *testing.T) {
 	}
 	if _, err := paths.LoadConfig(); err == nil || !strings.Contains(err.Error(), "unsupported schema") {
 		t.Fatalf("future schema error = %v", err)
+	}
+}
+
+func TestExplicitZeroReconnectJitterPersists(t *testing.T) {
+	root := t.TempDir()
+	paths := Paths{ConfigFile: filepath.Join(root, "config.json"), StateDir: filepath.Join(root, "state")}
+	config := Config{ReconnectInitial: "10ms", ReconnectMaximum: "1s", ReconnectFactor: 2, ReconnectJitter: 0}
+	if err := paths.SaveConfig(config); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := paths.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ReconnectJitter != 0 {
+		t.Fatalf("explicit zero jitter was replaced: %+v", loaded)
 	}
 }

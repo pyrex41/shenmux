@@ -37,17 +37,24 @@ The mux-specific emitter is intentionally narrower than generic `shengen`. It ch
 
 ## Current prototype limitations
 
-The current muxd/WebSocket prototype still has no remote authentication or
-authorization policy and no encrypted transport configuration. Owner-only
-local IPC containment is not a substitute for cryptographic identity. These
-are intentional prototype limitations, not the V1 product contract; the
-replacement contract and sequencing are in [V1/V2 plan](V1-V2-PLAN.md).
+The local muxd/WebSocket prototype remains intentionally local-only. The
+authenticated controller path now has durable ACL/capability/lease/audit
+policy, optional direct/Tailscale transport, and an endpoint-integrated blind
+stream: the native blind-stream client helper performs the X25519/Ed25519
+handshake, the agent decrypts and validates inner frames, and all
+attached/delta/input payloads are encrypted before crossing the relay. The
+controller continues to see only routing metadata and ciphertext for blind
+streams. Owner-only local IPC containment is not a substitute for
+cryptographic identity; hosted deployments still need a real browser identity
+provider.
 
 ## Not claimed
 
 - V1 trusted-server relay does not provide blind end-to-end confidentiality.
-- Blind relay confidentiality is a V2 claim, only after its key exchange,
-  downgrade, replay, and recovery tests pass.
+- Blind relay confidentiality is a V2 claim scoped to an honest identity
+  provider, browser origin/client distribution, and endpoint keys. Key
+  exchange, downgrade, replay, recovery, and bridge integration are covered;
+  routing, timing, and size metadata still remain visible to the controller.
 - No durable delivery guarantee from PUB/SUB.
 - No proof of liveness or bounded memory for an indefinitely running session.
 - No full native terminal snapshot in the current Ghostty C API integration.

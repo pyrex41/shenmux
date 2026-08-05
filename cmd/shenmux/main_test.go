@@ -61,6 +61,27 @@ func TestLoginThenStatusJSON(t *testing.T) {
 	}
 }
 
+func TestLoginPersistsTrustMode(t *testing.T) {
+	root := t.TempDir()
+	configFile := filepath.Join(root, "config", "config.json")
+	t.Setenv("SHENMUX_CONFIG_FILE", configFile)
+	t.Setenv("SHENMUX_STATE_DIR", filepath.Join(root, "state"))
+	var stdout, stderr bytes.Buffer
+	if err := execute(context.Background(), []string{"login", "--controller", "https://controller.example/", "--trust-mode", "blind"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	config, err := (appstate.Paths{ConfigFile: configFile, StateDir: filepath.Join(root, "state")}).LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.TrustMode != "blind" {
+		t.Fatalf("trust mode = %q", config.TrustMode)
+	}
+	if err := execute(context.Background(), []string{"login", "--controller", "https://controller.example/", "--trust-mode", "invalid"}, &stdout, &stderr); err == nil {
+		t.Fatal("invalid trust mode accepted")
+	}
+}
+
 func TestStatusReportsDirectTransportConfig(t *testing.T) {
 	root := t.TempDir()
 	configFile := filepath.Join(root, "config", "config.json")
