@@ -60,6 +60,16 @@ func (f *clientFault) Error() string {
 
 func (f *clientFault) Unwrap() error { return f.err }
 
+// encodeFault marks a reply this server built but could not encode. It is a
+// defect in one answer, not in the socket, so it must not travel to
+// ControlServer.Errors and end the session. It is distinct from clientFault
+// only because sendControl has no client id to attribute it to; the caller,
+// which does, converts it.
+type encodeFault struct{ err error }
+
+func (e *encodeFault) Error() string { return "encode control reply: " + e.err.Error() }
+func (e *encodeFault) Unwrap() error { return e.err }
+
 // peerGone reports whether a control-plane send failed because the addressed
 // peer is no longer connected, as opposed to because the socket is unusable.
 //
@@ -260,10 +270,18 @@ func handleControl(
 	// client -- rather than as a server failure that ends the session.
 	reply := func(msg protocol.Message) error {
 		err := sendControl(socket, identity, msg)
-		if err == nil || !peerGone(err) {
-			return err
+		if err == nil {
+			return nil
 		}
-		return &clientFault{client: cid, err: err}
+		// A reply that cannot be routed and a reply that cannot be encoded are
+		// both about the answer owed to one client; neither says the socket is
+		// unusable, so neither may end the session. Anything else on this path
+		// is a dead socket and stays fatal.
+		var encode *encodeFault
+		if peerGone(err) || errors.As(err, &encode) {
+			return &clientFault{client: cid, err: err}
+		}
+		return err
 	}
 	replyError := func(requestID uint64, cause error) error {
 		return reply(protocol.Message{
@@ -373,7 +391,7 @@ func controlAck(session string, cid shenguard.ClientID, requestID uint64, runtim
 func sendControl(socket controlSocket, identity []byte, msg protocol.Message) error {
 	frames, err := protocol.Encode(msg)
 	if err != nil {
-		return err
+		return &encodeFault{err: err}
 	}
 	return socket.SendMultipart(append([][]byte{identity}, frames...), 0)
 }

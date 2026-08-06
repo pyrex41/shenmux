@@ -83,14 +83,25 @@ type InputModes struct {
 	BracketedPaste bool
 	FocusEvents    bool
 
-	// Echo mirrors the PTY's termios ECHO bit: true when the line discipline
-	// echoes what is typed. It does not come from the escape stream -- the
-	// emulator cannot know it -- so the session daemon, which owns the master
-	// fd, stamps it onto each frame.
+	// Echo mirrors the PTY's termios ECHO bit: true when the KERNEL line
+	// discipline echoes what is typed. It does not come from the escape stream
+	// -- the emulator cannot know it -- so the session daemon, which owns the
+	// master fd, stamps it onto each frame.
 	//
-	// It exists so a client can predict local echo safely. A client must
-	// predict only while this is true: at a password prompt it is false, and
-	// predicting there would paint the password on screen.
+	// Do NOT read this as "the program is echoing what I type". It reports the
+	// line discipline only. readline and other line editors turn ECHO off and
+	// echo characters themselves, so at an interactive bash prompt this is
+	// false even though every keystroke visibly appears:
+	//
+	//	cat (canonical)     ECHO=true   ICANON=true
+	//	bash -i (readline)  ECHO=false  ICANON=false
+	//
+	// In particular this is not a safe gate for predicting local echo. It is
+	// false exactly where prediction would help, and true when a foreground
+	// program reads in canonical mode -- which includes the moment before a
+	// password prompt, where a stale true would paint the password on screen.
+	// A client wanting prediction needs a signal about the foreground program,
+	// which this is not.
 	Echo bool
 }
 

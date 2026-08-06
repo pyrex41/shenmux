@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,12 +46,12 @@ type processResult struct {
 
 // Serve owns one command, one authoritative PTY/VT state, and the two ZeroMQ
 // planes until the command exits or the context is canceled.
-// echoPollInterval bounds how long a client can keep predicting local echo
-// after the PTY has turned it off. A prediction made inside this window is
-// still corrected -- an unechoed glyph is discarded on mismatch or timeout --
-// but the interval decides how briefly a password character could appear, so
-// it is deliberately short rather than merely cheap.
-const echoPollInterval = 25 * time.Millisecond
+// echoPollInterval bounds how stale the published termios ECHO bit can be.
+// Nothing safety-critical depends on it: ECHO is advisory metadata about the
+// line discipline, not a statement about whether the foreground program echoes
+// (see screen.InputModes.Echo). An ioctl is cheap, but there is no reason to
+// poll tightly for metadata no client may act on urgently.
+const echoPollInterval = 250 * time.Millisecond
 
 func Serve(ctx context.Context, cfg Config) error {
 	if cfg.Session == "" || cfg.ControlEndpoint == "" || cfg.DataEndpoint == "" {
@@ -182,8 +183,12 @@ func Serve(ctx context.Context, cfg Config) error {
 				return err
 			}
 		case <-echoPoll.C:
+			// Deliberately not fatal. Echo is advisory metadata; failing to
+			// publish it is not a reason to take a working shell down, and
+			// adding a new way to lose a session here would undo the point of
+			// classifying control errors in the first place.
 			if err := runtime.RefreshEcho(); err != nil {
-				return fmt.Errorf("refresh PTY echo state: %w", err)
+				log.Printf("shenmux: refresh PTY echo state: %v", err)
 			}
 		case err, ok := <-controlErrors:
 			if !ok {

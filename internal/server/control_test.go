@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -361,4 +362,31 @@ func controlCall(t *testing.T, socket *zmqx.Socket, msg protocol.Message) protoc
 		t.Fatalf("control error: %s", reply.Meta.Error)
 	}
 	return reply
+}
+
+// A reply this server cannot encode is a defect in one answer, not in the
+// socket. It used to travel to Errors() and end the session, which is exactly
+// the failure classifying send errors exists to prevent -- one frame further
+// up, where the original fix did not look.
+func TestControlServerSurvivesAReplyItCannotEncode(t *testing.T) {
+	// An error string past the protocol's payload ceiling cannot be encoded,
+	// so replyError fails at protocol.Encode rather than at the socket.
+	unencodable := strings.Repeat("x", protocol.MaxPayloadSize+1)
+	err := sendControl(newStubControlSocket(), []byte("client-a"), protocol.Message{
+		Kind: protocol.KindError,
+		Meta: protocol.Meta{Version: protocol.Version, Session: "test", Error: unencodable},
+	})
+	if err == nil {
+		t.Fatal("precondition: this reply should fail to encode")
+	}
+
+	var encode *encodeFault
+	if !errors.As(err, &encode) {
+		t.Fatalf("an unencodable reply must be an encodeFault, got %T: %v", err, err)
+	}
+	// The fatal path keys on everything that is not a client fault, so an
+	// encode failure reaching it would end the session.
+	if peerGone(err) {
+		t.Fatal("an encode failure must not be misreported as a departed peer")
+	}
 }
