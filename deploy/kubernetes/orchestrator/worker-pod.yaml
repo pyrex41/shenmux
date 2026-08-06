@@ -1,0 +1,149 @@
+# Phase-0 sketch of the pod the operator would create per AgentWorker: the
+# harness runs inside a shenmux PTY session, and the agent sidecar relays it
+# outbound to the controller. See docs/K8S-ORCHESTRATION.md. Assumes a worker
+# image containing both the full shenmux binary and the harness binary; the
+# root Dockerfile does not build one yet.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: worker-fix-flaky-tests
+  namespace: agents
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 20Gi
+  # Fork variant: provision from a snapshot of the source worker's PVC.
+  # dataSourceRef:
+  #   apiGroup: snapshot.storage.k8s.io
+  #   kind: VolumeSnapshot
+  #   name: fix-flaky-tests-snap-2026-08-06
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: worker-fix-flaky-tests
+  namespace: agents
+  labels:
+    shenmux.dev/worker: fix-flaky-tests
+    shenmux.dev/harness: codex
+spec:
+  # runtimeClassName: gvisor   # recommended: pods run untrusted agent output
+  securityContext:
+    runAsUser: 999
+    runAsGroup: 999
+    fsGroup: 999
+  initContainers:
+    - name: ipc-permissions
+      image: ghcr.io/pyrex41/shenmux-worker-codex:latest
+      command: ["sh", "-c", "chown 999:999 /run/shenmux && chmod 700 /run/shenmux"]
+      securityContext:
+        runAsUser: 0
+      volumeMounts:
+        - name: shenmux-ipc
+          mountPath: /run/shenmux
+  containers:
+    - name: harness
+      image: ghcr.io/pyrex41/shenmux-worker-codex:latest
+      command:
+        - shenmux
+        - run
+        - --session
+        - fix-flaky-tests
+        - --history-dir
+        - /state/shenmux/history
+        - --control
+        - ipc:///run/shenmux/fix-flaky-tests.ctl
+        - --data
+        - ipc:///run/shenmux/fix-flaky-tests.pub
+        - --
+        - codex
+        - exec
+        - "Find and fix the flaky tests in ./services/api"
+        # resume variant after suspend: codex resume --last
+      workingDir: /state/workspace
+      env:
+        - name: HOME
+          value: /state/home
+      volumeMounts:
+        - name: state
+          mountPath: /state
+        - name: shenmux-ipc
+          mountPath: /run/shenmux
+        - name: credentials
+          mountPath: /state/home/.credentials
+          readOnly: true
+    - name: shenmux-agent
+      image: ghcr.io/pyrex41/shenmux-worker-codex:latest
+      command:
+        - shenmux
+        - agent
+        - --controller
+        - https://mux.example.com
+        - --transport
+        - relay
+        - --harness
+        - codex
+        - --workload
+        - fix-flaky-tests
+        - --namespace
+        - $(POD_NAMESPACE)
+        - --pod
+        - $(POD_NAME)
+        - --node
+        - $(NODE_NAME)
+        - --session
+        - fix-flaky-tests
+        - --control
+        - ipc:///run/shenmux/fix-flaky-tests.ctl
+        - --data
+        - ipc:///run/shenmux/fix-flaky-tests.pub
+        - --enrollment-code
+        - $(SHENMUX_ENROLLMENT_CODE)
+      env:
+        - name: POD_NAME
+          valueFrom: {fieldRef: {fieldPath: metadata.name}}
+        - name: POD_NAMESPACE
+          valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+        - name: NODE_NAME
+          valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+        # Single-use code the operator mints from the controller per worker;
+        # the enrollment-mint API is net-new shenmux work (see design doc).
+        - name: SHENMUX_ENROLLMENT_CODE
+          valueFrom:
+            secretKeyRef: {name: worker-fix-flaky-tests-enroll, key: code}
+      volumeMounts:
+        - name: state
+          mountPath: /state
+        - name: shenmux-ipc
+          mountPath: /run/shenmux
+  volumes:
+    - name: state
+      persistentVolumeClaim:
+        claimName: worker-fix-flaky-tests
+    - name: shenmux-ipc
+      emptyDir: {}
+    - name: credentials
+      secret:
+        secretName: harness-codex-credentials
+---
+# Default-deny egress; allow DNS plus the provider endpoints this harness
+# needs. Tighten per environment.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: worker-fix-flaky-tests
+  namespace: agents
+spec:
+  podSelector:
+    matchLabels:
+      shenmux.dev/worker: fix-flaky-tests
+  policyTypes: [Egress]
+  egress:
+    - to: []
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    - to: []
+      ports:
+        - {protocol: TCP, port: 443}

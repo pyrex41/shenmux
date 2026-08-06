@@ -1,0 +1,68 @@
+# Example AgentWorker resources for the design in
+# docs/K8S-ORCHESTRATION.md. Nothing reconciles these yet.
+---
+# A codex worker given a one-shot task. Its terminal is the shenmux session
+# "fix-flaky-tests"; attach from the workspace to watch or take control.
+apiVersion: shenmux.dev/v1alpha1
+kind: AgentWorker
+metadata:
+  name: fix-flaky-tests
+  namespace: agents
+spec:
+  harness: codex
+  prompt: "Find and fix the flaky tests in ./services/api"
+  workspace:
+    size: 20Gi
+---
+# An interactive pi worker: the TUI starts idle and is driven entirely
+# through the shenmux workspace.
+apiVersion: shenmux.dev/v1alpha1
+kind: AgentWorker
+metadata:
+  name: pi-scratch
+  namespace: agents
+spec:
+  harness: pi
+  interactive: true
+---
+# A fork: clone fix-flaky-tests's volume (workspace + harness session state
+# + shenmux history) into a new worker that resumes the conversation and
+# diverges. Fork suspended workers for clean snapshots.
+apiVersion: shenmux.dev/v1alpha1
+kind: AgentWorker
+metadata:
+  name: fix-flaky-tests-alt
+  namespace: agents
+spec:
+  harness: codex
+  prompt: "Try the quarantine-and-rewrite approach instead"
+  workspace:
+    from:
+      workerRef: fix-flaky-tests
+---
+# A suspended worker: pod deleted, PVC retained. Clear `suspend` to resume.
+apiVersion: shenmux.dev/v1alpha1
+kind: AgentWorker
+metadata:
+  name: refactor-auth
+  namespace: agents
+spec:
+  harness: opencode
+  suspend: true
+  workspace:
+    size: 50Gi
+---
+# A claude-managed worker as the bridge Deployment would create it after
+# claiming a work item from Anthropic's environment queue. The pod runs the
+# headless runner inside the shenmux PTY; the name derives from the managed
+# session ID so redelivery is idempotent.
+apiVersion: shenmux.dev/v1alpha1
+kind: AgentWorker
+metadata:
+  name: cm-sess-01k1x2y3z4
+  namespace: agents
+  labels:
+    shenmux.dev/managed-session: sess_01k1x2y3z4
+spec:
+  harness: claude-managed
+  credentialsSecretRef: anthropic-environment-key

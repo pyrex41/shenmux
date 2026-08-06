@@ -1,0 +1,115 @@
+# Sketch CRD for the orchestration layer described in
+# docs/K8S-ORCHESTRATION.md. Illustrative, not installed or reconciled by
+# anything in this repository yet.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: agentworkers.shenmux.dev
+spec:
+  group: shenmux.dev
+  scope: Namespaced
+  names:
+    plural: agentworkers
+    singular: agentworker
+    kind: AgentWorker
+    shortNames: [aw]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Harness
+          type: string
+          jsonPath: .spec.harness
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Session
+          type: string
+          jsonPath: .status.shenmuxSession
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [harness]
+              properties:
+                harness:
+                  type: string
+                  enum: [claude-managed, codex, pi, opencode]
+                prompt:
+                  type: string
+                  description: >-
+                    Initial task. For claude-managed workers the prompt
+                    arrives via the work queue and this field is ignored.
+                interactive:
+                  type: boolean
+                  default: false
+                  description: >-
+                    Start the harness TUI idle instead of running the prompt
+                    non-interactively; steer via the shenmux workspace.
+                suspend:
+                  type: boolean
+                  default: false
+                  description: >-
+                    Delete the worker pod but keep its PVC. Clearing this
+                    resumes the worker with the harness resume invocation.
+                workspace:
+                  type: object
+                  properties:
+                    size:
+                      type: string
+                      default: 20Gi
+                    storageClassName:
+                      type: string
+                    from:
+                      type: object
+                      description: >-
+                        Fork source. The operator snapshots the source
+                        worker's PVC and provisions this worker's PVC from
+                        the snapshot. Exactly one field may be set.
+                      properties:
+                        workerRef:
+                          type: string
+                        volumeSnapshotRef:
+                          type: string
+                image:
+                  type: string
+                  description: Override the harness profile's worker image.
+                resources:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                credentialsSecretRef:
+                  type: string
+                  description: >-
+                    Override the harness profile's credentials Secret
+                    (mounted as files, never argv).
+                ttlSecondsAfterFinished:
+                  type: integer
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, Provisioning, Running, Suspended, Completed, Failed]
+                podName:
+                  type: string
+                pvcName:
+                  type: string
+                shenmuxSession:
+                  type: string
+                workspaceURL:
+                  type: string
+                forkedFrom:
+                  type: string
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+      subresources:
+        status: {}

@@ -1,0 +1,278 @@
+# Kubernetes agent orchestration design
+
+## Status
+
+This is a design document for a Kubernetes orchestration layer that runs
+coding-agent workers observable and controllable through shenmux. Nothing in
+this document is implemented unless it links to code in this repository. It
+builds on the implemented controller/agent path in
+[ARCHITECTURE.md](ARCHITECTURE.md), the durable-history direction in
+[SESSION-HISTORY.md](SESSION-HISTORY.md), and the production gates in
+[V1-V2-PLAN.md](V1-V2-PLAN.md).
+
+## Goal
+
+Run a fleet of coding-agent **workers** on Kubernetes, where each worker is:
+
+- **durable** — its workspace and conversation state survive pod deletion;
+- **resumable** — a suspended worker can be brought back and continue its
+  conversation where it stopped;
+- **forkable** — a worker can be cloned at a point in time into a new worker
+  that diverges independently;
+- **observable and steerable** — every worker's terminal is a shenmux
+  session, attachable from the controller workspace, with control leases for
+  human takeover.
+
+Workers run one of several **harnesses**:
+
+| Harness | Loop location | Pod process | Interactive |
+| --- | --- | --- | --- |
+| `claude-managed` | Anthropic's servers (managed agents) | Anthropic runner executing tool calls | No (headless runner) |
+| `codex` | In pod | `codex` TUI or `codex exec` | Yes |
+| `pi` | In pod | `pi` TUI or `pi -p` | Yes |
+| `opencode` | In pod | `opencode` TUI or `opencode run` | Yes |
+
+The split matters. `claude-managed` follows the Sprites-style work-queue
+model: Anthropic hosts the model loop and enqueues sessions; our side claims
+work items and provides an isolated execution environment. The other three are
+CLI agents whose loop runs inside the pod, and whose TUI **is** the natural
+interaction surface — which is exactly what shenmux relays.
+
+shenmux already carries the vocabulary for this: the agent advertises
+`--harness` ("codex, claude, pi, or custom"), `--workload`, `--pod`,
+`--namespace`, and `--orchestrator` metadata
+(`cmd/shenmux/main.go`), and the relay identity model includes
+`Harness` and `Orchestrator` fields (`internal/relay/identity.go`).
+
+## Worker pod shape
+
+Every worker, regardless of harness, is the same three-part pod. This extends
+the sidecar sketch in
+[`deploy/kubernetes/agent-sidecar.yaml`](../deploy/kubernetes/agent-sidecar.yaml):
+
+```text
+per-worker Pod
+├─ main container:
+│    shenmux run --session $WORKER_NAME \
+│                --history-dir /state/shenmux/history \
+│                -- <harness command>
+├─ sidecar container:
+│    shenmux agent --controller https://mux.example.com \
+│                  --transport relay \
+│                  --harness <harness> --workload <worker> \
+│                  --namespace $(POD_NAMESPACE) --pod $(POD_NAME) \
+│                  --session $WORKER_NAME
+├─ volume: state    (PVC, per worker — the durable identity)
+└─ volume: shenmux-ipc (emptyDir shared by both containers)
+```
+
+Rules:
+
+- The harness process runs **inside** the PTY owned by `shenmux run`. That is
+  what makes the worker's terminal a durable, attachable session rather than
+  logs. For `claude-managed` the runner is headless, so the session is an
+  observation surface; for the CLI harnesses it is the full interaction
+  surface — attach, take control, type into the agent, release control.
+- One PVC per worker, mounted at `/state`. Everything that defines the worker
+  lives under it, so suspend/resume/fork are operations on exactly one volume:
+
+```text
+/state
+├── workspace/        the working tree (repos, artifacts)
+├── home/             harness home; state dirs live here via $HOME=/state/home
+│   ├── .codex/       codex sessions (rollout files), auth
+│   ├── .pi/          pi agent sessions
+│   └── .local/share/opencode/   opencode sessions, auth
+└── shenmux/
+    └── history/      durable terminal archive (shenmux run --history-dir)
+```
+
+- The agent sidecar dials **out** to the shenmux controller. No inbound
+  connections to worker pods, no `kubectl exec` as the access path.
+
+## Harness abstraction
+
+A harness is a small static profile the orchestrator consumes:
+
+```yaml
+harness:
+  name: codex
+  image: ghcr.io/pyrex41/shenmux-worker-codex:latest
+  command: ["codex"]                      # interactive default
+  runArgs: ["exec", "$(PROMPT)"]          # non-interactive task form
+  resumeArgs: ["resume", "--last"]        # continue after suspend
+  stateDirs: ["/state/home/.codex"]
+  credentials:
+    secretRef: harness-codex-credentials  # OPENAI_API_KEY or auth.json
+```
+
+Equivalent profiles:
+
+- `pi`: `pi` / `pi -p "$(PROMPT)"` / `pi --continue`; state in
+  `/state/home/.pi`.
+- `opencode`: `opencode` / `opencode run "$(PROMPT)"` /
+  `opencode --continue`; state in `/state/home/.local/share/opencode`.
+  opencode's client/server mode (`opencode serve`) is a candidate for a
+  richer non-TTY control path later, but the v1 contract is the same PTY
+  wrapper as the others.
+- `claude-managed`: image carries Anthropic's provider-agnostic runner and
+  SDK baked in (replacing the Sprites upload + `pip install` step);
+  credentials are the **scoped environment key only** — the org API key
+  never enters the cluster. Resume/redelivery is handled by Anthropic's work
+  queue; the pod name derives from the session ID so redelivery is
+  idempotent (`AlreadyExists` plays the role of Sprites' HTTP 409).
+
+Exact resume flags and state paths per harness are pinned down during
+image-building (phase 0 below); the abstraction only requires that each
+harness has *some* file-backed session state and *some* resume invocation.
+
+## The orchestrator layer
+
+### AgentWorker CRD
+
+The unit of orchestration is a namespaced `AgentWorker` custom resource
+reconciled by an operator:
+
+```yaml
+apiVersion: shenmux.dev/v1alpha1
+kind: AgentWorker
+metadata:
+  name: fix-flaky-tests
+spec:
+  harness: codex
+  prompt: "Find and fix the flaky tests in ./services/api"
+  interactive: false          # true = TUI idle, steer via shenmux
+  suspend: false              # true = delete pod, keep PVC
+  workspace:
+    size: 20Gi
+    from:                     # omit for a fresh worker
+      workerRef: refactor-auth   # fork: clone this worker's state
+  ttlSecondsAfterFinished: 86400
+status:
+  phase: Running              # Pending|Provisioning|Running|Suspended|Completed|Failed
+  podName: worker-fix-flaky-tests-abc12
+  pvcName: worker-fix-flaky-tests
+  shenmuxSession: fix-flaky-tests
+  workspaceURL: https://mux.example.com/workspace?session=fix-flaky-tests
+  forkedFrom: refactor-auth@snap-2026-08-06T17-04
+```
+
+The operator reconciles each `AgentWorker` into: a PVC (fresh, or cloned for
+forks), a minted shenmux enrollment credential, and the worker pod described
+above. It garbage-collects pods on suspend/TTL and never deletes a PVC except
+on `AgentWorker` deletion.
+
+### Lifecycle verbs
+
+- **spawn** — create an `AgentWorker`. Fresh PVC, new shenmux session.
+- **suspend** — set `spec.suspend: true`. The operator deletes the pod; the
+  PVC (workspace + harness session files + shenmux history) remains. This is
+  the idle-cost answer: Kubernetes has no Sprites-style pause, so durability
+  lives in the volume, not the pod.
+- **resume** — clear `suspend`. The operator recreates the pod with the
+  harness's `resumeArgs`, so the agent continues its recorded conversation
+  against the same workspace. The shenmux session name is stable, so the
+  controller workspace shows the same session again; `--history-dir` gives
+  the terminal archive continuity across the pod boundary.
+- **fork** — create an `AgentWorker` whose `workspace.from` names a source
+  worker. The operator takes a CSI `VolumeSnapshot` of the source PVC and
+  provisions the new PVC from it (`dataSourceRef`). Because harness session
+  state is plain files under `/state`, cloning the volume clones the
+  conversation; the fork resumes it under a new worker identity and diverges.
+  For a clean fork, fork a **suspended** worker; forking a live worker is
+  allowed but crash-consistent (the snapshot may catch a mid-write state).
+  The finer-grained future is the git-based workspace-checkpoint manifest
+  described in [SESSION-HISTORY.md](SESSION-HISTORY.md); volume cloning is
+  the v1 mechanism because it needs no harness cooperation.
+  - `claude-managed` caveat: the conversation lives on Anthropic's side and
+    has no fork API; forking such a worker clones the workspace only and
+    starts a fresh managed session against it.
+- **attach** — not an operator verb at all: `status.workspaceURL` deep-links
+  into the shenmux controller workspace, where control leases already govern
+  who may write.
+
+### Who calls the verbs
+
+Three producers create and drive `AgentWorker`s:
+
+1. **Humans**, via `kubectl` or the shenmux workspace (fleet view grouped by
+   namespace/workload/harness — the metadata the agent already advertises).
+2. **The claude-managed bridge**: a small Deployment running Anthropic's
+   environment work poller (or webhook receiver). Each claimed work item
+   becomes an `AgentWorker` with `harness: claude-managed`; session
+   completion marks the worker `Completed`. This is the direct analogue of
+   the Sprites worker, with `spawn()` replaced by creating a CR.
+3. **Orchestrator agents**: a worker whose sidecar is marked
+   `--orchestrator`, given access to an **orchestration MCP server** exposing
+   `spawn_worker`, `suspend_worker`, `resume_worker`, `fork_worker`,
+   `list_workers`, and `get_worker_output`. Any of the four harnesses can
+   play orchestrator, since all of them speak MCP. This is how "an agent
+   spins up durable/resumable/forkable sub-workers" is expressed: the
+   orchestrator plans, forks a base worker per approach, and harvests
+   results — while every sub-worker remains a first-class shenmux session a
+   human can open and steer.
+
+The MCP server is a thin authenticated shim over the Kubernetes API
+(create/patch `AgentWorker` CRs), so RBAC on the CR is the single
+authorization point for humans, the bridge, and orchestrator agents alike.
+
+## Security posture
+
+- **Isolation**: default pod isolation is weaker than the microVMs the
+  Sprites model assumes. Worker pods should run under a gVisor/Kata
+  `runtimeClassName`, the restricted Pod Security Standard, and a
+  default-deny egress `NetworkPolicy` with per-harness allowlists (the
+  provider API endpoints, plus whatever the task needs).
+- **Credentials**: `claude-managed` keeps the org key out of the cluster by
+  design; the CLI harnesses cannot — they need live provider credentials in
+  the pod. Mitigate by routing them through an LLM gateway (so pods hold
+  only short-lived gateway credentials) or per-worker scoped keys, mounted
+  as Secret files, never argv. Assume anything in `/state` is readable by
+  the task the agent executes.
+- **shenmux trust boundary**: the controller/agent path is currently a
+  development path — trusted browser only, no production identity, and
+  controller restarts drop live connections (agents reconnect). The fleet
+  workspace must sit behind real authentication before this design leaves a
+  trusted internal network; that work is already gated in
+  [V1-V2-PLAN.md](V1-V2-PLAN.md).
+
+## Net-new work this design requires
+
+In shenmux:
+
+1. **Enrollment minting API.** The controller issues a single-use enrollment
+   code on stderr with a ten-minute expiry — right shape, wrong delivery for
+   ephemeral pods. The operator needs an authenticated controller endpoint to
+   mint one code per worker at provision time, injected as a Secret and
+   consumed on first agent start.
+2. **Worker images.** The root `Dockerfile` builds only the legacy `muxd`
+   image. Needed: a base image with the full `shenmux` binary, plus one thin
+   layer per harness (harness binary + runner, `HOME=/state/home`).
+3. **History restore verification.** `shenmux run --history-dir` persists the
+   authoritative archive; confirm (and wire, if missing) that a restarted
+   `shenmux run` restores the persisted checkpoint so resumed workers keep
+   their terminal scrollback, not just their conversation files.
+
+New components (this repo or a sibling):
+
+4. `AgentWorker` CRD + operator (spawn/suspend/resume/fork/GC).
+5. Claude-managed bridge (work-queue poller → CRs).
+6. Orchestration MCP server (verbs over the CR API).
+
+## Phasing
+
+- **Phase 0 — prove the pod.** Build the worker images; run one hand-written
+  pod per harness with the `shenmux run` wrapper and agent sidecar; attach
+  from the workspace; pin down each harness's state dirs and resume flags.
+  No operator yet.
+- **Phase 1 — durable/resumable.** `AgentWorker` CRD + operator with
+  spawn/suspend/resume and PVC ownership; enrollment-mint API in the
+  controller.
+- **Phase 2 — forkable + managed.** `VolumeSnapshot`-based fork; the
+  claude-managed work-queue bridge with idempotent redelivery.
+- **Phase 3 — orchestrator agents.** Orchestration MCP server; fleet
+  grouping in the workspace using the advertised harness/workload/
+  orchestrator metadata.
+
+Sketch manifests for the CRD and example workers live in
+[`deploy/kubernetes/orchestrator/`](../deploy/kubernetes/orchestrator/).
