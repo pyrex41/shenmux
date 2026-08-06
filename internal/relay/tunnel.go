@@ -256,7 +256,15 @@ type controllerAgent struct {
 	conn        *websocket.Conn
 	metadata    AgentMetadata
 	connectedAt time.Time
-	mu          sync.Mutex // gorilla/websocket permits one concurrent writer only
+	// writeSem serializes writes because gorilla/websocket permits one
+	// concurrent writer only. It is a semaphore rather than a mutex so a
+	// teardown write can give up instead of parking behind a data write to a
+	// peer that has stopped reading.
+	writeSem chan struct{}
+}
+
+func newControllerAgent(conn *websocket.Conn, metadata AgentMetadata) *controllerAgent {
+	return &controllerAgent{conn: conn, metadata: metadata, connectedAt: time.Now().UTC(), writeSem: make(chan struct{}, 1)}
 }
 
 type authorizedStream struct {
@@ -372,7 +380,7 @@ func (c *Controller) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Register the authenticated agent and route opaque stream envelopes until
 	// the connection closes. In blind mode the controller only decodes the
 	// routing header; payload bytes are forwarded without inspection.
-	agent := &controllerAgent{conn: conn, metadata: metadata, connectedAt: time.Now().UTC()}
+	agent := newControllerAgent(conn, metadata)
 	c.mu.Lock()
 	if old := c.agents[deviceID]; old != nil && old.conn != conn {
 		_ = old.conn.Close()
@@ -493,6 +501,37 @@ func (c *Controller) handleBrowser(w http.ResponseWriter, r *http.Request) {
 	c.streams[key] = stream
 	c.mu.Unlock()
 	c.audit(policy.AuditEvent{Actor: subject, DeviceID: key.device, Session: key.session, Action: "attach", RequestID: env.Header.RequestID, Capability: capability.ID, Outcome: "allowed"})
+	// The agent has to hear that this browser is gone however the stream ends.
+	// A tab that is simply closed sends no CLOSE frame, and a revoked, replayed
+	// or misbound stream never gets the chance to: every one of those leaves the
+	// agent holding a muxd client, an attachment and possibly the exclusive
+	// control lease for a peer that no longer exists. Sending from the deferred
+	// teardown makes the notification unconditional -- a new `return` in the
+	// loop below cannot forget it -- and mirrors the agent-side teardown in
+	// handleWebSocket, which closes every browser stream of a departed agent
+	// from its own defer. sync.Once makes it exactly-once: the browser's own
+	// CLOSE, when there is one, is forwarded verbatim and consumes it.
+	var agentClose sync.Once
+	closeTowardAgent := func() {
+		agentClose.Do(func() {
+			// Keep the outer counter monotonic in the browser->agent direction
+			// so the frame is indistinguishable from one the browser sent.
+			counter, _ := stream.browserIn.Last()
+			data, err := (Envelope{Header: Header{
+				FrameType: FrameClose, DeviceID: key.device, SessionID: key.session,
+				StreamID: key.stream, Counter: counter + 1,
+			}, Payload: []byte("browser stream ended")}).Encode()
+			if err != nil {
+				return
+			}
+			if err := controllerWriteWithin(agent, data, agentCloseTimeout); err != nil {
+				log.Printf("relay browser %s/%s close -> agent: %v", key.device, key.session, err)
+			}
+		})
+	}
+	// browserClosedAgent records that the browser's own CLOSE was already
+	// forwarded, so teardown does not append a second one.
+	browserClosedAgent := func() { agentClose.Do(func() {}) }
 	defer func() {
 		c.mu.Lock()
 		if c.streams[key] == stream {
@@ -501,6 +540,9 @@ func (c *Controller) handleBrowser(w http.ResponseWriter, r *http.Request) {
 		c.mu.Unlock()
 		stream.closeOnce.Do(func() { close(stream.closed) })
 		_ = c.Policy.ReleaseLease(key.session, subject)
+		// Local bookkeeping is complete before the notification, so a slow agent
+		// can delay only the frame it is owed, not this stream's slot or lease.
+		closeTowardAgent()
 		c.audit(policy.AuditEvent{Actor: subject, DeviceID: key.device, Session: key.session, Action: "detach", Capability: capability.ID, Outcome: "allowed"})
 	}()
 	go c.watchStreamAuthorization(stream)
@@ -533,10 +575,15 @@ func (c *Controller) handleBrowser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if env.Header.FrameType == FrameClose {
+			browserClosedAgent()
 			return
 		}
 	}
 }
+
+// agentCloseTimeout bounds the close the controller sends toward the agent when
+// a browser stream ends.
+const agentCloseTimeout = 2 * time.Second
 
 // BrowserCapability is the bearer value returned by POST /capabilities and
 // presented once in the payload of the browser's first OPEN envelope.
@@ -790,8 +837,29 @@ func (c *Controller) RevokeGrant(grantID, reason string) error {
 }
 
 func controllerWrite(agent *controllerAgent, data []byte) error {
-	agent.mu.Lock()
-	defer agent.mu.Unlock()
+	agent.writeSem <- struct{}{}
+	defer func() { <-agent.writeSem }()
+	return agent.conn.WriteMessage(websocket.BinaryMessage, data)
+}
+
+// controllerWriteWithin is controllerWrite for teardown paths. Teardown
+// usually runs *because* the far side is already gone, so it bounds both the
+// wait for the write slot and the write itself: a wedged agent must cost this
+// handler a bounded delay, never the goroutine. Exceeding the deadline leaves
+// the tunnel unusable, which is why only teardown writes use it.
+func controllerWriteWithin(agent *controllerAgent, data []byte, timeout time.Duration) error {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case agent.writeSem <- struct{}{}:
+	case <-timer.C:
+		return errors.New("relay agent write slot is unavailable")
+	}
+	defer func() { <-agent.writeSem }()
+	if err := agent.conn.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+		return err
+	}
+	defer func() { _ = agent.conn.SetWriteDeadline(time.Time{}) }()
 	return agent.conn.WriteMessage(websocket.BinaryMessage, data)
 }
 

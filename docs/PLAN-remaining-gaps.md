@@ -264,6 +264,18 @@ test that genuinely hangs the stub, or it proves nothing.
 
 ## 6. The controller never tells the agent a browser is gone
 
+**CLOSED.** `handleBrowser` now notifies the agent from its teardown defer,
+registered before the OPEN is forwarded and after the stream is recorded -- so
+every exit inherits it and a future `return` cannot forget. Suppressed by a
+`sync.Once` shared with the clean-close path, and bounded by a write deadline so
+a stalled agent delays only the frame it is owed, never the stream slot or the
+lease. Closing a browser transport with no close frame now delivers a close to
+the agent; the test fails against the previous implementation.
+
+This also fixed a case not named below: **capability revocation**. Revoking a
+capability closed the browser socket, and the agent was never told the stream
+had been cut off.
+
 **Severity: high — this is the root cause of item 1 in the previous plan**, which
 was fixed at the symptom.
 
