@@ -206,6 +206,46 @@ checkpoints in SESSION-HISTORY.md compose rather than compete: the overlay
 delta is the coarse restore/fork unit, and git worktree state is the
 human-readable diff inside it.
 
+### Checkpoint manifest: autopoiesis-compatible
+
+Verified against the autopoiesis source (`packages/core/src/snapshot/`),
+so worker checkpoints can be read by its tooling rather than merely
+resembling it:
+
+- Its on-disk snapshot is an s-expression
+  `(snapshot :version 1 :id <uuid> :timestamp <unix-seconds>
+  :parent <uuid|nil> :agent-state <sexpr> :metadata <plist>
+  :hash <sha256-of-agent-state>)`, stored as
+  `snapshots/<id[0:2]>/<id>.sexpr` beside an index file. Worker manifests
+  adopt `:id` (random UUID as identity), `:parent`, `:metadata`, and the
+  hash-as-dedup-fingerprint distinction verbatim.
+- Its filesystem tree entries are plists
+  `(:file "path" :hash <sha256-of-bytes> :mode <st_mode> :size N :mtime T)`
+  sorted by path, with a canonical tree hash over `F:path:hash:mode:size`
+  strings (mtime excluded). But `snapshot-to-sexpr` **drops**
+  `:tree-root`/`:tree-entries` — filesystem state never round-trips to
+  disk. Worker manifests are therefore a strict superset: the same entry
+  format, plus persisted `:tree-root`, `:tree-entries`, and an
+  `:upperdir-archive <sha256>` pointing at the delta archive in object
+  storage. Persisting the entries makes autopoiesis's `tree-diff` (two
+  sorted entry lists in, add/remove/modify records out) work on *stored*
+  checkpoints — its own `manager-diff` can only compare live sandboxes by
+  rescanning.
+- The natural integration point is its **execution-backend protocol**
+  (`backend-create/destroy/exec/snapshot/restore/fork`,
+  `backend-supports-native-fork-p`) — almost exactly the operator's verb
+  set. A `k8s-overlay-backend` implementing it, answering
+  `supports-native-fork-p → T`, gives its `manager-fork` a genuinely
+  O(delta) native path (today only its docker backend claims one, via
+  `docker commit`), and the overlay upperdir realizes the incremental
+  snapshot path its unused `changeset.lisp` was built for.
+- Impedance mismatches to respect: three time bases coexist in autopoiesis
+  (double-float unix seconds, universal-time integers) — worker manifests
+  carry integer unix seconds and label them in `:metadata`; its branch
+  objects are in-memory only and branch merge is unimplemented, so
+  checkpoint-DAG branches are owned by the operator/CR layer, with
+  autopoiesis branches treated as ephemeral views.
+
 ## The orchestrator layer
 
 ### AgentWorker CRD
@@ -291,13 +331,22 @@ Three producers create and drive `AgentWorker`s:
    human can open and steer.
 
    autopoiesis is the natural orchestrator brain here, beyond being the
-   source of the snapshot model: point its tool layer at the orchestration
-   MCP server and its agents can spawn/fork/suspend workers as actions in
-   their cognitive loop. The symmetry is the point — the orchestrator's
-   *cognitive* state and each worker's *filesystem* state are both
-   content-addressed forkable DAGs, so forking a plan branch can fork the
-   workers it was driving, and diffing two plan branches can pull in the
-   corresponding worker-timeline diffs.
+   source of the snapshot model, and the wiring already exists on its
+   side: its stdio MCP client (`connect-mcp-server-config` +
+   `register-mcp-tools-as-capabilities`) turns every tool of an external
+   MCP server into a first-class agent capability in one call, so the
+   orchestration verbs land directly in its cognitive loop. (Its JSON-RPC
+   client is strictly synchronous request/response — the orchestration
+   server must not emit server-initiated notifications.) It also already
+   drives claude/codex/opencode as headless pipe-based subprocess
+   providers and routes `:pi` tasks despite shipping no pi provider, and
+   it contains no PTY or multiplexer code at all — shenmux workers supply
+   exactly the durable interactive terminal surface it lacks. The
+   symmetry is the point — the orchestrator's *cognitive* state and each
+   worker's *filesystem* state are both content-addressed forkable DAGs,
+   so forking a plan branch can fork the workers it was driving, and
+   diffing two plan branches can pull in the corresponding
+   worker-timeline diffs.
 
 The MCP server is a thin authenticated shim over the Kubernetes API
 (create/patch `AgentWorker` CRs), so RBAC on the CR is the single
@@ -310,6 +359,12 @@ authorization point for humans, the bridge, and orchestrator agents alike.
   `runtimeClassName`, the restricted Pod Security Standard, and a
   default-deny egress `NetworkPolicy` with per-harness allowlists (the
   provider API endpoints, plus whatever the task needs).
+- **Permission bypass is the norm, not the exception**: harnesses run
+  unattended inside workers with their own permission prompts disabled
+  (autopoiesis's claude-code provider passes
+  `--dangerously-skip-permissions`; codex runs `--full-auto`). The pod
+  sandbox, egress policy, and shenmux control leases are therefore the
+  *only* effective controls — design them as such.
 - **Credentials**: `claude-managed` keeps the org key out of the cluster by
   design; the CLI harnesses cannot — they need live provider credentials in
   the pod. Mitigate by routing them through an LLM gateway (so pods hold
