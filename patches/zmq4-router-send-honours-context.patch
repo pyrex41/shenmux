@@ -1,0 +1,156 @@
+diff --git a/dealer.go b/dealer.go
+index f88f2aa..1380cb5 100644
+--- a/dealer.go
++++ b/dealer.go
+@@ -25,7 +25,7 @@ func (s *DEALER) Send(ctx context.Context, msg Message) error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	if !p.send(msg, s.base.closeCh) {
++	if !p.send(context.Background(), msg, s.base.closeCh) {
+ 		return ErrClosed
+ 	}
+ 	return nil
+diff --git a/pair.go b/pair.go
+index 6ce550f..73cf6e6 100644
+--- a/pair.go
++++ b/pair.go
+@@ -52,7 +52,7 @@ func (s *PAIR) Send(ctx context.Context, msg Message) error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	if !p.send(msg, s.base.closeCh) {
++	if !p.send(context.Background(), msg, s.base.closeCh) {
+ 		return ErrClosed
+ 	}
+ 	return nil
+diff --git a/pipe.go b/pipe.go
+index 44c148b..f9d92b3 100644
+--- a/pipe.go
++++ b/pipe.go
+@@ -1,6 +1,7 @@
+ package zmq4
+ 
+ import (
++	"context"
+ 	"crypto/rand"
+ 	"sync"
+ 
+@@ -105,9 +106,14 @@ func (p *pipe) writeLoop(closeCh <-chan struct{}) {
+ }
+ 
+ // send enqueues msg for delivery according to the pipe's overflow policy.
+-// Returns true if the message was queued, false if the socket is closing (Block)
+-// or the queue is full (Drop).
+-func (p *pipe) send(msg Message, closeCh <-chan struct{}) bool {
++// Returns true if the message was queued, false if the socket is closing
++// (Block), the queue is full (Drop), or ctx was cancelled while waiting.
++//
++// Under Block, waiting on ctx as well as closeCh is what keeps one peer that
++// has stopped draining from wedging the socket for everybody: without it the
++// only way out is closing the whole socket, so a caller who passed a context
++// with a deadline would still block forever.
++func (p *pipe) send(ctx context.Context, msg Message, closeCh <-chan struct{}) bool {
+ 	switch p.overflow {
+ 	case Drop:
+ 		select {
+@@ -122,6 +128,8 @@ func (p *pipe) send(msg Message, closeCh <-chan struct{}) bool {
+ 			return true
+ 		case <-closeCh:
+ 			return false
++		case <-ctx.Done():
++			return false
+ 		}
+ 	}
+ }
+diff --git a/pipe_test.go b/pipe_test.go
+index d71f1f1..7004732 100644
+--- a/pipe_test.go
++++ b/pipe_test.go
+@@ -1,6 +1,7 @@
+ package zmq4
+ 
+ import (
++	"context"
+ 	"net"
+ 	"testing"
+ 	"time"
+@@ -106,7 +107,7 @@ func TestPipeSendBlock(t *testing.T) {
+ 
+ 	sent := make(chan bool, 1)
+ 	go func() {
+-		sent <- p.send(Message{[]byte("second")}, closeCh)
++		sent <- p.send(context.Background(), Message{[]byte("second")}, closeCh)
+ 	}()
+ 
+ 	select {
+@@ -135,7 +136,7 @@ func TestPipeSendDrop(t *testing.T) {
+ 	p := newPipe(nil, nil, 1, 1000, Drop)
+ 	p.outCh <- Message{[]byte("first")} // fill the queue
+ 
+-	ok := p.send(Message{[]byte("second")}, closeCh)
++	ok := p.send(context.Background(), Message{[]byte("second")}, closeCh)
+ 	if ok {
+ 		t.Fatal("send with Drop policy on full queue should return false")
+ 	}
+@@ -151,7 +152,7 @@ func TestPipeSendClosedSocket(t *testing.T) {
+ 	p := newPipe(nil, nil, 1, 1000, Block)
+ 	p.outCh <- Message{[]byte("fill")} // fill so Block would normally block
+ 
+-	ok := p.send(Message{[]byte("msg")}, closeCh)
++	ok := p.send(context.Background(), Message{[]byte("msg")}, closeCh)
+ 	if ok {
+ 		t.Fatal("send to closed socket should return false")
+ 	}
+diff --git a/push.go b/push.go
+index 82092ac..9b99b58 100644
+--- a/push.go
++++ b/push.go
+@@ -27,7 +27,7 @@ func (s *PUSH) Send(ctx context.Context, msg Message) error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	if !p.send(msg, s.base.closeCh) {
++	if !p.send(context.Background(), msg, s.base.closeCh) {
+ 		return ErrClosed
+ 	}
+ 	return nil
+diff --git a/rep.go b/rep.go
+index 503b085..79724c1 100644
+--- a/rep.go
++++ b/rep.go
+@@ -77,7 +77,7 @@ func (s *REP) Send(ctx context.Context, msg Message) error {
+ 	// Combine envelope frames (incl. empty delimiter) with payload into one
+ 	// message. sendFrames in writeLoop sets More=true on all but the last frame.
+ 	combined := append(Message(env), msg...)
+-	if !p.send(combined, s.base.closeCh) {
++	if !p.send(context.Background(), combined, s.base.closeCh) {
+ 		return ErrClosed
+ 	}
+ 	return nil
+diff --git a/req.go b/req.go
+index 688789b..061b04c 100644
+--- a/req.go
++++ b/req.go
+@@ -54,7 +54,7 @@ func (s *REQ) Send(ctx context.Context, msg Message) error {
+ 	combined := make(Message, 1+len(msg))
+ 	combined[0] = nil // empty delimiter (zero-length frame)
+ 	copy(combined[1:], msg)
+-	if !p.send(combined, s.base.closeCh) {
++	if !p.send(context.Background(), combined, s.base.closeCh) {
+ 		s.mu.Lock()
+ 		s.sent = false
+ 		s.mu.Unlock()
+diff --git a/router.go b/router.go
+index 50d7a04..870ebb7 100644
+--- a/router.go
++++ b/router.go
+@@ -50,7 +50,7 @@ func (s *ROUTER) Send(ctx context.Context, msg Message) error {
+ 	if p == nil {
+ 		return fmt.Errorf("%w: identity %x", ErrNoRoute, msg[0])
+ 	}
+-	if !p.send(msg[1:], s.base.closeCh) {
++	if !p.send(ctx, msg[1:], s.base.closeCh) {
+ 		return ErrClosed
+ 	}
+ 	return nil
