@@ -1,6 +1,5 @@
 import { Application, BitmapFont, BitmapText, Container, Graphics } from "pixi.js";
 import Shen from "shen-script";
-import { createPredictor } from "./predictive-echo.mjs";
 
 (() => {
   "use strict";
@@ -42,42 +41,6 @@ import { createPredictor } from "./predictive-echo.mjs";
   // visible while offline, but never apply deltas from the old stream to it.
   let reconnectTimer;
   let reconnectDelay = 250;
-
-  // Predictive local echo. `?predict=off` disables it, `?predict=strict`
-  // underlines unconfirmed glyphs the way mosh does. Predictions are an overlay
-  // composited at render time; `state.screen.Frame` stays authoritative.
-  const predictParam = (new URLSearchParams(location.search).get("predict") || "").toLowerCase();
-  const predictor = createPredictor({ enabled: predictParam !== "off", strict: predictParam === "strict" });
-  const predictionStyle = predictParam === "strict" ? { Underline: true } : {};
-  let predictionTimer;
-  const clockNow = () => performance.now();
-  const inputContext = () => ({
-    frame: state?.screen?.Frame,
-    seq: lastSeq,
-    hasControl: Boolean(state && clientID && state.control_owner === clientID),
-    now: clockNow(),
-  });
-  const drainPredictions = () => {
-    for (const y of predictor.takeDirtyRows()) dirtyRows.add(y);
-  };
-  // Predictions expire on their own if the server never echoes them, so the
-  // overlay needs a wakeup even when no publication arrives.
-  const schedulePredictionSweep = () => {
-    if (predictionTimer) {
-      clearTimeout(predictionTimer);
-      predictionTimer = undefined;
-    }
-    const deadline = predictor.nextDeadline();
-    if (deadline === null) return;
-    predictionTimer = setTimeout(() => {
-      predictionTimer = undefined;
-      if (predictor.tick(clockNow())) {
-        drainPredictions();
-        scheduleRender();
-      }
-      schedulePredictionSweep();
-    }, Math.max(0, deadline - clockNow()) + 5);
-  };
 
   const setStatus = (text, good = false) => {
     status.textContent = text;
@@ -155,7 +118,7 @@ import { createPredictor } from "./predictive-echo.mjs";
     return FONT_NAMES.regular;
   }
 
-  function renderRow(view, row, defaultFG, defaultBG, y, overlay) {
+  function renderRow(view, row, defaultFG, defaultBG, y) {
     view.container.y = y;
     view.background.clear();
     let backgroundColor = null;
@@ -181,12 +144,7 @@ import { createPredictor } from "./predictive-echo.mjs";
       runText = "";
     };
     for (let x = 0; x < view.cols; x++) {
-      const predicted = overlay?.get(x);
-      // A prediction is drawn as ordinary text: immediacy is the whole point,
-      // and the underline is only for the strict/debug mode.
-      const cell = predicted
-        ? { Text: predicted.text, Width: 1, Style: predictionStyle }
-        : (row?.[x] || { Text: "", Width: 1, Style: {} });
+      const cell = row?.[x] || { Text: "", Width: 1, Style: {} };
       const style = cell.Style || {};
       let fg = color(style.FG, defaultFG);
       let bg = color(style.BG, defaultBG);
@@ -200,11 +158,6 @@ import { createPredictor } from "./predictive-echo.mjs";
         backgroundStart = x;
       }
       if (bgKey !== null) backgroundWidth += width;
-      // The renderer draws no underlines otherwise, so the strict/debug mode
-      // marks unconfirmed glyphs itself rather than silently doing nothing.
-      if (predicted && predictionStyle.Underline) {
-        view.background.rect(x * cellW, lineH - 2, cellW * width, 1).fill(fg);
-      }
       const key = `${fontFor(style)}:${fg}:${visible ? 1 : 0}:${style.Faint ? 1 : 0}`;
       if (key !== runKey) {
         flushRun();
@@ -265,16 +218,10 @@ import { createPredictor } from "./predictive-echo.mjs";
     for (let y = 0; y < frame.Rows; y++) {
       const absoluteRow = firstRow + y;
       const row = absoluteRow < history.length ? history[absoluteRow] : frame.Lines[absoluteRow - history.length];
-      // Overlay coordinates are live-frame coordinates, so they only apply
-      // while the view is not scrolled back into history.
-      const overlay = scrollPixels === 0 ? predictor.rowAt(y) : null;
-      if (dirtyRows.has(y) || scrollPixels !== 0) renderRow(rowViews[y], row, defaultFG, defaultBG, y * lineH + rowOffset, overlay);
+      if (dirtyRows.has(y) || scrollPixels !== 0) renderRow(rowViews[y], row, defaultFG, defaultBG, y * lineH + rowOffset);
     }
     cursorLayer.clear();
-    const predictedCursor = scrollPixels === 0 ? predictor.cursorPosition() : null;
-    const cursor = predictedCursor
-      ? { ...frame.Cursor, X: predictedCursor.x, Y: predictedCursor.y }
-      : frame.Cursor;
+    const cursor = frame.Cursor;
     if (scrollPixels === 0 && cursor?.Visible && cursor.X < frame.Cols && cursor.Y < frame.Rows) {
       const cursorColor = color(frame.DefaultFG, 0xd7e0ea);
       const x = cursor.X * cellW;
@@ -283,10 +230,7 @@ import { createPredictor } from "./predictive-echo.mjs";
       else if (cursor.Style === 2) cursorLayer.rect(x, y + lineH - 2, cellW, 2).fill({ color: cursorColor, alpha: .72 });
       else cursorLayer.rect(x, y, cellW, lineH).fill({ color: cursorColor, alpha: .72 });
     }
-    const predictDebug = predictParam === "strict"
-      ? ` · predict ${predictor.size()} · rtt ${Math.round(predictor.rtt() || 0)}ms`
-      : "";
-    details.textContent = `${frame.Cols}×${frame.Rows} · seq ${lastSeq}${scrollPixels ? ` · ↑ ${Math.ceil(scrollPixels / lineH)} rows` : ""}${predictDebug}${frame.Title ? ` · ${frame.Title}` : ""}`;
+    details.textContent = `${frame.Cols}×${frame.Rows} · seq ${lastSeq}${scrollPixels ? ` · ↑ ${Math.ceil(scrollPixels / lineH)} rows` : ""}${frame.Title ? ` · ${frame.Title}` : ""}`;
     dirtyRows.clear();
     // The first snapshot can arrive before Pixi's ticker has produced its
     // first frame. Render synchronously so a newly attached browser never
@@ -320,9 +264,6 @@ import { createPredictor } from "./predictive-echo.mjs";
     // need policy evaluation; awaiting ShenScript here makes every keypress
     // pay an interpreter round trip and serializes fast typing.
     if (kind === "input") {
-      // Every byte sent starts the round-trip clock the predictor gates on, so
-      // RTT is measured from ordinary traffic without a new protocol message.
-      predictor.onSend(clockNow());
       send({ type: "input", ...payload });
       return;
     }
@@ -337,8 +278,6 @@ import { createPredictor } from "./predictive-echo.mjs";
       clientID = message.client_id || "";
       state = { seq: message.current.seq, screen: message.current.screen, control_owner: message.current.control_owner || "" };
       lastSeq = message.current.seq || 0;
-      predictor.onSnapshot(clockNow());
-      drainPredictions();
       sessionLabel.textContent = message.session || "session";
       setStatus(state.control_owner === clientID ? "connected · control" : "connected", true);
       refreshControlButtons();
@@ -348,21 +287,10 @@ import { createPredictor } from "./predictive-echo.mjs";
     }
     if (message.type === "delta" || message.type === "control" || message.type === "exit") {
       if (message.seq !== lastSeq + 1) { send({ type: "resync" }); return; }
-      if (message.type === "delta") {
-        applyDelta(message.delta);
-        // Reconcile the overlay against authoritative state: confirm what the
-        // server agrees with, discard the epoch where it does not.
-        predictor.onDelta(message.delta, message.seq, clockNow());
-      }
-      if (message.type === "control") {
-        state.control_owner = message.control_owner || "";
-        // Losing the lease means our keystrokes no longer reach the PTY.
-        if (state.control_owner !== clientID) predictor.flush(clockNow());
-      }
-      if (message.type === "exit") { setStatus(`exited (${message.exit_code})`); predictor.flush(clockNow()); }
+      if (message.type === "delta") applyDelta(message.delta);
+      if (message.type === "control") state.control_owner = message.control_owner || "";
+      if (message.type === "exit") setStatus(`exited (${message.exit_code})`);
       lastSeq = message.seq;
-      drainPredictions();
-      schedulePredictionSweep();
       refreshControlButtons();
       scheduleRender();
       return;
@@ -422,13 +350,7 @@ import { createPredictor } from "./predictive-echo.mjs";
     const cols = Math.max(1, Math.min(MAX_COLS, Math.floor((wrap.clientWidth - 4) / cellW)));
     const rows = Math.max(1, Math.min(MAX_ROWS, Math.floor((wrap.clientHeight - 4) / lineH)));
     const frame = state.screen.Frame;
-    if (cols === frame.Cols && rows === frame.Rows) return;
-    // Every overlay coordinate is about to mean something else.
-    if (predictor.onResize(clockNow())) {
-      drainPredictions();
-      scheduleRender();
-    }
-    sendCommand("resize", { cols, rows });
+    if (cols !== frame.Cols || rows !== frame.Rows) sendCommand("resize", { cols, rows });
   }
 
   async function start() {
@@ -484,13 +406,6 @@ import { createPredictor } from "./predictive-echo.mjs";
       const data = keyData(event);
       if (!data) return;
       event.preventDefault();
-      // Predict before sending so the glyph is on screen this frame. The
-      // keystroke goes on the wire unchanged either way.
-      if (predictor.onKey(event, inputContext()) !== "skipped") {
-        drainPredictions();
-        schedulePredictionSweep();
-        scheduleRender();
-      }
       sendCommand("input", { data });
     });
     app.canvas.addEventListener("paste", (event) => {
@@ -498,12 +413,6 @@ import { createPredictor } from "./predictive-echo.mjs";
       jumpToLive();
       const data = event.clipboardData.getData("text/plain");
       const wrapped = terminalModes().BracketedPaste ? `\x1b[200~${data}\x1b[201~` : data;
-      // A paste's effect is not knowable here — bracketed or not, the remote
-      // may transform it. Never predict it, and drop anything outstanding.
-      if (predictor.onUnpredictableInput(clockNow())) {
-        drainPredictions();
-        scheduleRender();
-      }
       sendCommand("input", { data: wrapped });
     });
     app.canvas.addEventListener("pointerdown", (event) => {
@@ -564,11 +473,6 @@ import { createPredictor } from "./predictive-echo.mjs";
       };
       socket.onclose = () => {
         setStatus("disconnected · retrying");
-        // Nothing outstanding can ever be confirmed now.
-        if (predictor.flush(clockNow())) {
-          drainPredictions();
-          scheduleRender();
-        }
         if (reconnectTimer) return;
         reconnectTimer = setTimeout(connect, reconnectDelay);
         reconnectDelay = Math.min(5000, reconnectDelay * 2);

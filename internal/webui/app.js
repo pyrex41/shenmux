@@ -1,8 +1,3 @@
-// The plain-canvas client. It shares the prediction state machine with
-// pixi-client.js rather than reimplementing it, so the two cannot drift.
-// Importing makes this an ES module: load it with <script type="module">.
-import { createPredictor } from "./predictive-echo.mjs";
-
 (() => {
   "use strict";
 
@@ -22,35 +17,6 @@ import { createPredictor } from "./predictive-echo.mjs";
   let lastSeq = 0;
   let cellW = 9;
   let lineH = 17;
-
-  // Predictive local echo. `?predict=off` disables it, `?predict=strict`
-  // underlines unconfirmed glyphs. The overlay is composited in draw(); the
-  // server's frame is never mutated by it.
-  const predictParam = (new URLSearchParams(location.search).get("predict") || "").toLowerCase();
-  const predictor = createPredictor({ enabled: predictParam !== "off", strict: predictParam === "strict" });
-  let predictionTimer;
-  const clockNow = () => performance.now();
-  const inputContext = () => ({
-    frame: state?.screen?.Frame,
-    seq: lastSeq,
-    hasControl: Boolean(state && clientID && state.control_owner === clientID),
-    now: clockNow(),
-  });
-  // Predictions expire on their own if the server never echoes them, so the
-  // overlay needs a wakeup even when no publication arrives.
-  const schedulePredictionSweep = () => {
-    if (predictionTimer) {
-      clearTimeout(predictionTimer);
-      predictionTimer = undefined;
-    }
-    const deadline = predictor.nextDeadline();
-    if (deadline === null) return;
-    predictionTimer = setTimeout(() => {
-      predictionTimer = undefined;
-      if (predictor.tick(clockNow())) draw();
-      schedulePredictionSweep();
-    }, Math.max(0, deadline - clockNow()) + 5);
-  };
 
   const setStatus = (text, good = false) => {
     status.textContent = text;
@@ -102,8 +68,6 @@ import { createPredictor } from "./predictive-echo.mjs";
     frame.WorkingDirectory = delta.WorkingDirectory;
     frame.DefaultFG = delta.DefaultFG;
     frame.DefaultBG = delta.DefaultBG;
-    // Input modes carry the PTY's echo state, which gates prediction entirely.
-    frame.Modes = delta.Modes || {};
     if (delta.HistoryReset) state.screen.History = [];
     if (delta.HistoryDrop) state.screen.History = state.screen.History.slice(delta.HistoryDrop);
     if (delta.HistoryAppend) state.screen.History.push(...delta.HistoryAppend);
@@ -127,13 +91,8 @@ import { createPredictor } from "./predictive-echo.mjs";
     ctx.fillRect(0, 0, frame.Cols * cellW, frame.Rows * lineH);
     for (let y = 0; y < frame.Rows; y++) {
       const row = frame.Lines[y] || [];
-      const overlay = predictor.rowAt(y);
       for (let x = 0; x < frame.Cols; x++) {
-        const predicted = overlay?.get(x);
-        // Predictions are drawn as ordinary text; the underline is debug only.
-        const cell = predicted
-          ? { Text: predicted.text, Width: 1, Style: predictParam === "strict" ? { Underline: true } : {} }
-          : (row[x] || { Text: "", Width: 1, Style: {} });
+        const cell = row[x] || { Text: "", Width: 1, Style: {} };
         if (cell.Width === 0) continue;
         const style = cell.Style || {};
         let fg = color(style.FG, color(frame.DefaultFG, palette.fg));
@@ -147,10 +106,7 @@ import { createPredictor } from "./predictive-echo.mjs";
         if (style.Underline || style.DoubleUnderline) { ctx.fillRect(x * cellW, y * lineH + 16, cellW, style.DoubleUnderline ? 2 : 1); }
       }
     }
-    const predictedCursor = predictor.cursorPosition();
-    const cursor = predictedCursor && frame.Cursor
-      ? { ...frame.Cursor, X: predictedCursor.x, Y: predictedCursor.y }
-      : frame.Cursor;
+    const cursor = frame.Cursor;
     if (cursor && cursor.Visible && cursor.X < frame.Cols && cursor.Y < frame.Rows) {
       ctx.globalAlpha = .72;
       ctx.fillStyle = color(frame.DefaultFG, palette.fg);
@@ -168,7 +124,6 @@ import { createPredictor } from "./predictive-echo.mjs";
       state = { seq: message.current.seq, screen: message.current.screen,
         control_owner: message.current.control_owner || "" };
       lastSeq = message.current.seq || 0;
-      predictor.onSnapshot(clockNow());
       sessionLabel.textContent = message.session || "session";
       setStatus(state.control_owner === message.client_id ? "connected · control" : "connected", true);
       refreshControlButtons();
@@ -178,18 +133,10 @@ import { createPredictor } from "./predictive-echo.mjs";
     }
     if (message.type === "delta" || message.type === "control" || message.type === "exit") {
       if (message.seq !== lastSeq + 1) { send({ type: "resync" }); return; }
-      if (message.type === "delta") {
-        applyDelta(message.delta);
-        // Confirm what the server agrees with; discard the epoch where it does not.
-        predictor.onDelta(message.delta, message.seq, clockNow());
-      }
-      if (message.type === "control") {
-        state.control_owner = message.control_owner || "";
-        if (state.control_owner !== clientID) predictor.flush(clockNow());
-      }
-      if (message.type === "exit") { setStatus(`exited (${message.exit_code})`); predictor.flush(clockNow()); }
+      if (message.type === "delta") applyDelta(message.delta);
+      if (message.type === "control") state.control_owner = message.control_owner || "";
+      if (message.type === "exit") setStatus(`exited (${message.exit_code})`);
       lastSeq = message.seq;
-      schedulePredictionSweep();
       refreshControlButtons();
       draw();
       return;
@@ -216,19 +163,10 @@ import { createPredictor } from "./predictive-echo.mjs";
   canvas.addEventListener("keydown", (event) => {
     const data = keyData(event);
     if (!data) return;
-    event.preventDefault();
-    // Predict first so the glyph lands this frame; the bytes sent are unchanged.
-    if (predictor.onKey(event, inputContext()) !== "skipped") {
-      schedulePredictionSweep();
-      draw();
-    }
-    send({ type: "input", data });
+    event.preventDefault(); send({ type: "input", data });
   });
   canvas.addEventListener("paste", (event) => {
-    event.preventDefault();
-    // A paste's effect is not knowable client-side, so it is never predicted.
-    if (predictor.onUnpredictableInput(clockNow())) draw();
-    send({ type: "input", data: event.clipboardData.getData("text/plain") });
+    event.preventDefault(); send({ type: "input", data: event.clipboardData.getData("text/plain") });
   });
   canvas.addEventListener("click", () => canvas.focus());
 
@@ -237,10 +175,7 @@ import { createPredictor } from "./predictive-echo.mjs";
     const cols = Math.max(1, Math.floor((wrap.clientWidth - 4) / cellW));
     const rows = Math.max(1, Math.floor((wrap.clientHeight - 4) / lineH));
     const frame = state.screen.Frame;
-    if (cols === frame.Cols && rows === frame.Rows) return;
-    // Every overlay coordinate is about to mean something else.
-    if (predictor.onResize(clockNow())) draw();
-    send({ type: "resize", cols, rows });
+    if (cols !== frame.Cols || rows !== frame.Rows) send({ type: "resize", cols, rows });
   }
   new ResizeObserver(() => setTimeout(resizeForViewport, 80)).observe(wrap);
   acquireButton.addEventListener("click", () => send({ type: "acquire" }));
@@ -259,8 +194,6 @@ import { createPredictor } from "./predictive-echo.mjs";
     socket.onmessage = (event) => { try { onMessage(JSON.parse(event.data)); } catch (_) { setStatus("invalid server message"); } };
     socket.onclose = () => {
       setStatus("disconnected · retrying");
-      // Nothing outstanding can ever be confirmed now.
-      if (predictor.flush(clockNow())) draw();
       if (reconnectTimer) return;
       reconnectTimer = setTimeout(() => {
         reconnectTimer = undefined;
