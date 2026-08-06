@@ -1,0 +1,14 @@
+[package]
+name = "shenmux-golem-workspace"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# This crate is intentionally an opt-in Golem build; the normal shenmux build
+# does not need the Golem SDK or its generated bindings.
+golem-rust = { version = "1.5", features = ["export_golem_agentic"] }
+serde = { version = "1", features = ["derive"] }

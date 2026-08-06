@@ -10,6 +10,7 @@
     "shen-script": "0.17.0"
   },
   "devDependencies": {
+    "@bytecodealliance/jco": "^1.20.0",
     "esbuild": "0.25.9"
   }
 }

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>shenmux workspace</title>
+    <link rel="stylesheet" href="/workspace.css">
+  </head>
+  <body>
+    <main class="workspace-app">
+      <header class="workspace-topbar">
+        <div class="brand"><span class="dot"></span><span>shenmux</span><span class="muted">workspace</span></div>
+        <div class="workspace-status"><span id="storage-status">starting local workspace…</span><a href="/">terminal</a></div>
+      </header>
+
+      <div class="workspace-grid">
+        <aside class="file-pane">
+          <div class="pane-heading"><span>files</span><button id="new-file" title="Create a file">+</button></div>
+          <div id="file-list" class="file-list" aria-label="Workspace files"></div>
+        </aside>
+
+        <section class="main-pane">
+          <div class="editor-heading">
+            <span id="file-name">welcome</span>
+            <span id="file-meta" class="muted">OPFS workspace</span>
+          </div>
+          <textarea id="editor" spellcheck="false" aria-label="File editor"></textarea>
+          <div class="editor-actions">
+            <button id="save-file" disabled>save locally</button>
+            <span id="save-status" class="muted"></span>
+          </div>
+
+          <section class="command-pane">
+            <div id="command-output" class="command-output" role="log" aria-live="polite"></div>
+            <form id="command-form" class="command-form">
+              <span id="command-prompt" class="prompt">λ /</span>
+              <span class="command-input-shell">
+                <span id="command-input-measure" aria-hidden="true">&nbsp;</span>
+                <input id="command-input" autocomplete="off" spellcheck="false" aria-label="Workspace command" aria-describedby="command-completions" placeholder="try: ls, cat README.md, or write notes/today.md hello" disabled>
+              </span>
+              <span id="command-completions" class="command-completions" aria-live="polite"></span>
+              <span class="command-hint" aria-hidden="true"><kbd>Tab</kbd> complete</span>
+            </form>
+          </section>
+        </section>
+      </div>
+
+      <footer class="workspace-footer">
+        <span>local-first prototype</span>
+        <span>WASI component now · OPFS persists state · remote sync adapter next</span>
+      </footer>
+    </main>
+    <script type="module" src="/workspace.js"></script>
+  </body>
+</html>
