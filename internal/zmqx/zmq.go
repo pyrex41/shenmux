@@ -37,11 +37,11 @@ const (
 
 // These values retain the stable libzmq option numbers used by the callers.
 // The pure-Go adapter translates the options that affect shenmux behavior and
-// enforces receive message-size limits locally. Linger, RcvTimeout, Immediate
-// and XPubVerbose are harmless compatibility no-ops: every deadline the receive
-// path can want is expressed per call, through DontWait or the socket context,
-// which the driver's Recv honours. SndTimeout is the exception and is rejected
-// outright -- see SetInt.
+// enforces receive message-size limits locally. Linger, Immediate and
+// XPubVerbose are harmless compatibility no-ops. The two timeouts are not:
+// SndTimeout and RcvTimeout are rejected outright rather than accepted and
+// ignored, because a socket option that returns nil and changes nothing is
+// worse than one that is missing -- see SetInt.
 const (
 	Identity    = 5
 	Subscribe   = 6
@@ -60,6 +60,16 @@ const (
 const (
 	defaultMaxFrame  = 256 << 20
 	defaultMaxFrames = 16
+
+	// WireFrameLimit is the largest frame body a peer can make this process
+	// allocate, enforced by the driver's frame reader before any socket-level
+	// limit is consulted. It is the honest ceiling: MaxMsgSize decides what a
+	// socket keeps, this decides what it buffers.
+	//
+	// It mirrors wire.MaxFrameBodySize in the driver, which is unexported and
+	// has no socket option to lower it. If the driver changes it, the constant
+	// here is wrong and TestWireFrameLimitMatchesTheDriver fails.
+	WireFrameLimit = 32 << 20
 )
 
 var (
@@ -72,6 +82,13 @@ var (
 	// closes. Silently accepting a send timeout would hand callers a guarantee
 	// this adapter cannot keep.
 	ErrSendTimeoutUnsupported = errors.New("zmq send timeout is unsupported: this driver cannot abandon a send, bound it in the caller")
+
+	// ErrRecvTimeoutUnsupported rejects RcvTimeout for the same reason
+	// SndTimeout is rejected: this adapter never applied it. Receive deadlines
+	// are expressed per call -- DontWait, or the socket context -- both of
+	// which the driver's Recv honours. Accepting a socket-level receive
+	// timeout and ignoring it would be the same silent lie.
+	ErrRecvTimeoutUnsupported = errors.New("zmq receive timeout is unsupported: pass DontWait or use the socket context per call")
 
 	// ErrNoRoute and ErrNoIdentity are re-exported so callers can tell a
 	// per-peer delivery failure from a dead socket without importing zmq4
@@ -251,6 +268,9 @@ func (s *Socket) SetInt(option, value int) error {
 	if s.closed {
 		return ErrClosed
 	}
+	if option == RcvTimeout {
+		return ErrRecvTimeoutUnsupported
+	}
 	if option == SndTimeout {
 		// Rejected rather than ignored. This driver cannot bound a send at all:
 		// every Send takes a context.Context and discards it, and under the
@@ -262,7 +282,7 @@ func (s *Socket) SetInt(option, value int) error {
 		// server.boundedSender.
 		return ErrSendTimeoutUnsupported
 	}
-	if s.raw != nil && option != Linger && option != RcvTimeout && option != Immediate && option != XPubVerbose {
+	if s.raw != nil && option != Linger && option != Immediate && option != XPubVerbose {
 		return errors.New("zmq socket options must be set before bind or connect")
 	}
 	switch option {
@@ -276,16 +296,28 @@ func (s *Socket) SetInt(option, value int) error {
 			return errors.New("zmq receive HWM must be positive")
 		}
 		s.rcvHWM = value
-	case Linger, RcvTimeout, Immediate, XPubVerbose:
-		// Accepted and inert. Receive deadlines are expressed per call, via
-		// DontWait or the socket context, which the driver's Recv honours, and
-		// close is explicit; there is nothing for these to configure.
+	case Linger, Immediate, XPubVerbose:
+		// Accepted and inert, and unlike the rejected timeouts that is
+		// defensible: this adapter closes explicitly rather than lingering,
+		// and connects eagerly, so there is nothing for these to configure.
+		// They stay accepted because callers set them (control.go,
+		// publisher.go) and rejecting them would break working code to make a
+		// point.
 	default:
 		return fmt.Errorf("unsupported ZeroMQ integer option %d", option)
 	}
 	return nil
 }
 
+// SetInt64 sets MaxMsgSize, which bounds what this socket will ACCEPT, not what
+// a peer can make it ALLOCATE. The driver reads a frame off the wire in full
+// and only then hands it over, so this limit is applied to a buffer that
+// already exists: a socket configured for 1 KiB still allocates a 4 MiB frame
+// before refusing it (measured, not inferred).
+//
+// The real allocation bound is WireFrameLimit, enforced by the driver's frame
+// reader. Callers who need a tighter one cannot get it here -- the driver
+// exposes no socket option for it. See patches/ for the change that would.
 func (s *Socket) SetInt64(option int, value int64) error {
 	if option != MaxMsgSize {
 		return fmt.Errorf("unsupported ZeroMQ int64 option %d", option)

@@ -4,7 +4,7 @@ Changes to dependencies that we want but do not yet consume. Nothing here is
 applied automatically: `go.mod` has no `replace` directive and there is no
 vendor directory, so these are proposals, not builds.
 
-## zmq4-router-send-honours-context.patch
+## zmq4-bound-router-sends-and-frame-allocation.patch
 
 Against `github.com/tomi77/zmq4@v1.0.0`.
 
@@ -33,12 +33,38 @@ of blocking indefinitely.
 
 The driver's own suite cannot certify it. That suite is **flaky at baseline**:
 over five runs of the unpatched tree, 2/5 failed (`TestREPFairQueue`,
-"Recv: context deadline exceeded"); the patched tree failed 3/5. That difference
-is noise between two flaky samples, not evidence either way. Do not read the
-single clean patched run as a pass, and do not read a failing run as a
-regression — check whether the same test fails on an unpatched tree first. I
+"Recv: context deadline exceeded"). Patched samples have landed at 2/5 and 3/5
+across runs, which is noise between flaky samples rather than evidence either
+way. Do not read a clean patched run as a pass, and do not read a failing run as
+a regression — check whether the same test fails on an unpatched tree first. I
 nearly attributed the baseline flake to this patch.
 
-**Status.** Not submitted upstream. Not consumed here. The in-tree fix
-(`server.boundedSender`) does not depend on it; if this ever lands upstream the
-bound stays anyway, because it is what makes the behaviour ours to test.
+## Second change in the same patch: a settable frame ceiling
+
+**What it fixes.** A socket-level message-size limit can only be applied *after*
+the driver has read a frame in full, so it bounds what a socket keeps rather
+than what a peer can make it allocate. Measured: a socket configured for 1 KiB
+still allocates a 4 MiB frame and only then refuses it. The driver has a hard
+ceiling of 32 MiB (`wire.MaxFrameBodySize`) and `conn.WithMaxFrameBodySize` to
+lower it, but nothing plumbs that from socket options, so it is unreachable.
+
+**Shape.** `socketConfig` gains `maxFrameBodySize`, a `WithMaxFrameBodySize`
+socket option sets it, and both handshakes pass it down. The handshake functions
+already accepted `...conn.Option`, so nothing else changed.
+
+**Verified with a negative control.** A DEALER pushes 4 MiB at a ROUTER built
+with a 64 KiB ceiling. With the option the frame does not arrive; without it,
+4,194,309 bytes are delivered. The test fails without the change, which is what
+makes it worth having.
+
+## Status
+
+Neither change is submitted upstream or consumed here: `go.mod` has no `replace`
+directive. Regression rate against the flaky baseline is unchanged (2/5 runs
+failed, same as unpatched).
+
+The in-tree work does not depend on either. `server.boundedSender` bounds sends
+regardless, and `zmqx.WireFrameLimit` documents the allocation ceiling we cannot
+currently lower. If these land upstream, the bound stays anyway -- it is what
+makes the behaviour ours to test -- and `zmqx` gains the ability to pass a real
+ceiling down instead of naming one it cannot enforce.

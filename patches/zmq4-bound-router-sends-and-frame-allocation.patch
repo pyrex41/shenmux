@@ -1,3 +1,37 @@
+diff --git a/base.go b/base.go
+index 1c2bb74..03dab58 100644
+--- a/base.go
++++ b/base.go
+@@ -137,7 +137,7 @@ func (sb *socketBase) doServerHandshake(raw net.Conn, socketType string) {
+ 	if pas, ok := mech.(security.PeerAddrSetter); ok {
+ 		pas.SetPeerAddr(addr)
+ 	}
+-	c, err := conn.ServerHandshake(hsCtx, raw, mech)
++	c, err := conn.ServerHandshake(hsCtx, raw, mech, sb.handshakeOptions()...)
+ 	if err != nil {
+ 		sb.emit(SocketEvent{Type: EventHandshakeFailed, Endpoint: addr, Err: err})
+ 		return // raw already closed by F4 on handshake failure
+@@ -165,7 +165,7 @@ func (sb *socketBase) connect(ctx context.Context, endpoint, socketType string)
+ 		raw.Close()
+ 		return err
+ 	}
+-	c, err := conn.ClientHandshake(hsCtx, raw, mech)
++	c, err := conn.ClientHandshake(hsCtx, raw, mech, sb.handshakeOptions()...)
+ 	if err != nil {
+ 		sb.emit(SocketEvent{Type: EventHandshakeFailed, Endpoint: endpoint, Err: err})
+ 		return err
+@@ -327,3 +327,11 @@ func (sb *socketBase) sendWaitPipe(ctx context.Context) (*pipe, error) {
+ 		}
+ 	}
+ }
++
++// handshakeOptions translates socket-level limits into per-connection ones.
++func (sb *socketBase) handshakeOptions() []conn.Option {
++	if sb.cfg == nil || sb.cfg.maxFrameBodySize <= 0 {
++		return nil
++	}
++	return []conn.Option{conn.WithMaxFrameBodySize(sb.cfg.maxFrameBodySize)}
++}
 diff --git a/dealer.go b/dealer.go
 index f88f2aa..1380cb5 100644
 --- a/dealer.go
@@ -11,6 +45,39 @@ index f88f2aa..1380cb5 100644
  		return ErrClosed
  	}
  	return nil
+diff --git a/options.go b/options.go
+index dc0394e..cd54c32 100644
+--- a/options.go
++++ b/options.go
+@@ -26,6 +26,10 @@ const defaultHandshakeTimeout = 5 * time.Second
+ 
+ // socketConfig holds per-socket configuration built from Option functions.
+ type socketConfig struct {
++	// maxFrameBodySize caps the body of a post-handshake frame, i.e. the
++	// largest allocation a peer can force. Zero uses the wire default.
++	maxFrameBodySize int64
++
+ 	// clientMechFactory builds a fresh ClientMechanism for Connect paths.
+ 	clientMechFactory func(socketType string) (security.ClientMechanism, error)
+ 	// serverMechFactory builds a fresh Mechanism for Bind/Accept paths.
+@@ -255,3 +259,17 @@ func WithZAPDomain(r *zmqzap.Router, domain string) Option {
+ func WithMonitor(ch chan<- SocketEvent) Option {
+ 	return func(cfg *socketConfig) { cfg.monitorCh = ch }
+ }
++
++// WithMaxFrameBodySize caps the body of post-handshake frames, bounding the
++// largest allocation a peer can force on this socket. Zero or unset keeps the
++// wire default. Panics if n is negative.
++//
++// Without this, a socket-level message-size limit can only be applied after the
++// frame has been read in full, so it bounds what a socket keeps rather than
++// what a peer can make it allocate.
++func WithMaxFrameBodySize(n int64) Option {
++	if n < 0 {
++		panic("zmq4: WithMaxFrameBodySize: n must not be negative")
++	}
++	return func(c *socketConfig) { c.maxFrameBodySize = n }
++}
 diff --git a/pair.go b/pair.go
 index 6ce550f..73cf6e6 100644
 --- a/pair.go
