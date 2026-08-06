@@ -137,8 +137,18 @@ func TestEchoFailsClosed(t *testing.T) {
 		if pub.count() != before {
 			t.Fatal("a PTY that cannot report echo must not publish anything")
 		}
+
+		// Publish through the ordinary output path so there is a real frame to
+		// inspect. Reading the echo bit with nothing published would only be
+		// reading the helper's zero value, which any implementation passes.
+		if err := runtime.HandlePTYOutput([]byte("hello")); err != nil {
+			t.Fatal(err)
+		}
+		if !waitForCount(pub, before+1) {
+			t.Fatal("PTY output should have published a delta")
+		}
 		if echoOfPublishedFrame(t, pub) {
-			t.Fatal("echo must stay false when the PTY cannot report it")
+			t.Fatal("echo must stay false in a published frame when the PTY cannot report it")
 		}
 	})
 

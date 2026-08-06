@@ -8,6 +8,13 @@ Control messages have two or three application frames:
 [kind] [JSON metadata] [optional binary payload]
 ```
 
+A control message with the wrong number of application frames is answered with
+an `error` naming the count. There is one case the server cannot answer: a
+message whose frame count or frame size exceeds what the receive path will
+accept is consumed and refused before the identity frame is parsed, so there is
+nobody to reply to. The server logs it and drops it, and the sender has to fall
+back on its own timeout. This is the only request that gets silence.
+
 ROUTER adds the routing identity as the first transport frame. Published messages add the topic as the first application frame:
 
 ```text

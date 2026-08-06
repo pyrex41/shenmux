@@ -37,9 +37,11 @@ const (
 
 // These values retain the stable libzmq option numbers used by the callers.
 // The pure-Go adapter translates the options that affect shenmux behavior and
-// enforces receive message-size limits locally. Linger, timeout, immediate, and XPUB
-// verbose are harmless compatibility no-ops because the underlying API uses
-// contexts and explicit close semantics.
+// enforces receive message-size limits locally. Linger, RcvTimeout, Immediate
+// and XPubVerbose are harmless compatibility no-ops: every deadline the receive
+// path can want is expressed per call, through DontWait or the socket context,
+// which the driver's Recv honours. SndTimeout is the exception and is rejected
+// outright -- see SetInt.
 const (
 	Identity    = 5
 	Subscribe   = 6
@@ -63,6 +65,13 @@ const (
 var (
 	ErrWouldBlock = errors.New("zmq operation would block")
 	ErrClosed     = errors.New("zmq object is closed")
+
+	// ErrSendTimeoutUnsupported rejects SndTimeout. The pure-Go driver has no
+	// way to abandon a send: ROUTER.Send and its siblings take a context and
+	// never read it, so a send blocks until the peer drains or the socket
+	// closes. Silently accepting a send timeout would hand callers a guarantee
+	// this adapter cannot keep.
+	ErrSendTimeoutUnsupported = errors.New("zmq send timeout is unsupported: this driver cannot abandon a send, bound it in the caller")
 
 	// ErrNoRoute and ErrNoIdentity are re-exported so callers can tell a
 	// per-peer delivery failure from a dead socket without importing zmq4
@@ -242,7 +251,18 @@ func (s *Socket) SetInt(option, value int) error {
 	if s.closed {
 		return ErrClosed
 	}
-	if s.raw != nil && option != Linger && option != RcvTimeout && option != SndTimeout && option != Immediate && option != XPubVerbose {
+	if option == SndTimeout {
+		// Rejected rather than ignored. This driver cannot bound a send at all:
+		// every Send takes a context.Context and discards it, and under the
+		// default blocking overflow policy a full queue parks the caller until
+		// the socket itself closes. Accepting the option would return a clean
+		// nil and change nothing, which is the worst possible answer to give
+		// someone reaching for it -- they are, by definition, trying to stop a
+		// send from blocking forever. Bound the send in the caller instead; see
+		// server.boundedSender.
+		return ErrSendTimeoutUnsupported
+	}
+	if s.raw != nil && option != Linger && option != RcvTimeout && option != Immediate && option != XPubVerbose {
 		return errors.New("zmq socket options must be set before bind or connect")
 	}
 	switch option {
@@ -256,8 +276,10 @@ func (s *Socket) SetInt(option, value int) error {
 			return errors.New("zmq receive HWM must be positive")
 		}
 		s.rcvHWM = value
-	case Linger, RcvTimeout, SndTimeout, Immediate, XPubVerbose:
-		// Context cancellation and explicit close provide these semantics.
+	case Linger, RcvTimeout, Immediate, XPubVerbose:
+		// Accepted and inert. Receive deadlines are expressed per call, via
+		// DontWait or the socket context, which the driver's Recv honours, and
+		// close is explicit; there is nothing for these to configure.
 	default:
 		return fmt.Errorf("unsupported ZeroMQ integer option %d", option)
 	}

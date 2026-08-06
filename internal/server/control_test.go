@@ -106,11 +106,14 @@ func (stubReadyWaiter) WaitReady(context.Context, shenguard.ClientID) error { re
 // peer's pipe has disappeared, which is the only way to exercise a client that
 // vanishes between its request and its reply without racing a real disconnect.
 type stubControlSocket struct {
-	mu      sync.Mutex
-	queue   []stubControlEvent
-	replies []stubControlReply
-	gone    map[string]bool
-	closed  bool
+	mu       sync.Mutex
+	queue    []stubControlEvent
+	replies  []stubControlReply
+	gone     map[string]bool
+	stalled  map[string]bool
+	attempts map[string]int
+	released chan struct{}
+	closed   bool
 }
 
 type stubControlEvent struct {
@@ -124,7 +127,12 @@ type stubControlReply struct {
 }
 
 func newStubControlSocket() *stubControlSocket {
-	return &stubControlSocket{gone: make(map[string]bool)}
+	return &stubControlSocket{
+		gone:     make(map[string]bool),
+		stalled:  make(map[string]bool),
+		attempts: make(map[string]int),
+		released: make(chan struct{}),
+	}
 }
 
 func (s *stubControlSocket) RecvMultipartLimit(_, _, maxFrames int) ([][]byte, error) {
@@ -148,14 +156,27 @@ func (s *stubControlSocket) RecvMultipartLimit(_, _, maxFrames int) ([][]byte, e
 
 func (s *stubControlSocket) SendMultipart(frames [][]byte, _ int) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return zmqx.ErrClosed
 	}
 	if len(frames) == 0 || len(frames[0]) == 0 {
+		s.mu.Unlock()
 		return zmq.ErrNoIdentity
 	}
-	if s.gone[string(frames[0])] {
+	identity := string(frames[0])
+	if s.stalled[identity] {
+		// Verbatim tomi77/zmq4 behaviour for a peer that has stopped reading:
+		// ROUTER.Send discards its context and p.send waits on the socket's own
+		// close channel, so nothing short of closing the socket returns.
+		s.attempts[identity]++
+		released := s.released
+		s.mu.Unlock()
+		<-released
+		return zmqx.ErrClosed
+	}
+	defer s.mu.Unlock()
+	if s.gone[identity] {
 		// Verbatim zmq4 ROUTER.Send behaviour for an identity with no pipe.
 		return fmt.Errorf("%w: identity %x", zmq.ErrNoRoute, frames[0])
 	}
@@ -163,14 +184,21 @@ func (s *stubControlSocket) SendMultipart(frames [][]byte, _ int) error {
 	if err != nil {
 		return err
 	}
-	s.replies = append(s.replies, stubControlReply{identity: string(frames[0]), msg: msg})
+	s.replies = append(s.replies, stubControlReply{identity: identity, msg: msg})
 	return nil
 }
 
 func (s *stubControlSocket) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
 	s.closed = true
+	// Closing the socket is the only thing that frees a send parked in the
+	// driver, so the stub has to free them too or the test leaks the goroutine
+	// it is measuring.
+	close(s.released)
 	return nil
 }
 
@@ -180,6 +208,23 @@ func (s *stubControlSocket) vanish(identity string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.gone[identity] = true
+}
+
+// stall makes every later reply to identity block until the socket closes,
+// which is what the pure-Go ROUTER does once that peer's queue is full.
+func (s *stubControlSocket) stall(identity string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stalled[identity] = true
+}
+
+// sendAttempts counts the sends to identity that actually reached the socket
+// and parked there, which is the number of goroutines the control loop has left
+// waiting on that one client.
+func (s *stubControlSocket) sendAttempts(identity string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.attempts[identity]
 }
 
 func (s *stubControlSocket) push(event stubControlEvent) {
@@ -230,6 +275,22 @@ func awaitReply(t *testing.T, socket *stubControlSocket, identity string, reques
 	return protocol.Message{}
 }
 
+// awaitErrorReply is awaitReply for the answers that are supposed to be errors.
+func awaitErrorReply(t *testing.T, socket *stubControlSocket, identity string) protocol.Message {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, reply := range socket.repliesTo(identity) {
+			if reply.Kind == protocol.KindError {
+				return reply
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("%s was never told why its message was refused", identity)
+	return protocol.Message{}
+}
+
 // serveNextClient drives a fresh client all the way through attach, taking
 // control, and typing, which is only possible if the session is still alive and
 // the control lease is free.
@@ -253,7 +314,10 @@ func serveNextClient(t *testing.T, socket *stubControlSocket, cid shenguard.Clie
 // routed, and the daemon treated that per-peer failure as a dead server. The
 // session, its shell and its scrollback all went with it.
 func TestControlServerSurvivesAClientThatVanishesMidReply(t *testing.T) {
-	runtime, pty, _ := newTestRuntime(t)
+	// A long lease deliberately: with the default short test lease the
+	// background reaper would free the departed client's control lease on a
+	// timer, and this test would pass whether or not dropClient ran at all.
+	runtime, pty, _ := newTestRuntimeWith(t, protocol.DefaultStoreLimits(), time.Hour)
 	gone := testCID(t, "web-e91ea4799bb00e0ac4b18599")
 	next := testCID(t, "client-next")
 	if _, err := runtime.AttachSnapshot(gone); err != nil {
@@ -307,14 +371,123 @@ func TestControlServerSurvivesAnUnreadableClientMessage(t *testing.T) {
 	server := newControlServer(ctx, socket, "test", runtime, stubReadyWaiter{})
 	defer server.Close()
 
-	// More frames than a control request may carry.
-	socket.push(stubControlEvent{frames: [][]byte{[]byte("noisy"), {1}, {2}, {3}, {4}}})
+	// More frames than the receive path will hand back at all, so the message
+	// is consumed and refused with no identity left to answer -- the one case
+	// ControlServer.Errors documents as a deliberate silent drop.
+	frames := make([][]byte, maxControlRecvFrames+1)
+	frames[0] = []byte("noisy")
+	for i := 1; i < len(frames); i++ {
+		frames[i] = []byte{byte(i)}
+	}
+	socket.push(stubControlEvent{frames: frames})
 
 	serveNextClient(t, socket, testCID(t, "client-next"), pty)
 
 	select {
 	case err, ok := <-server.Errors():
 		t.Fatalf("control server reported err=%v (open=%t); one bad message must not be fatal", err, ok)
+	default:
+	}
+}
+
+// TestControlServerAnswersAMalformedFrameCount covers the third outcome
+// handleControl used to have and never admitted to: a message it could neither
+// parse nor reply to. A frame count the receive path hands back still carries
+// the sender's ROUTER identity, so the sender can be told what it did instead
+// of waiting out its own timeout for an answer that was never coming.
+func TestControlServerAnswersAMalformedFrameCount(t *testing.T) {
+	runtime, pty, _ := newTestRuntime(t)
+	socket := newStubControlSocket()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server := newControlServer(ctx, socket, "test", runtime, stubReadyWaiter{})
+	defer server.Close()
+
+	noisy := testCID(t, "client-noisy")
+	// One frame past the protocol but inside the receive cap, which is the
+	// point of the slack in maxControlRecvFrames.
+	socket.push(stubControlEvent{frames: [][]byte{[]byte(noisy.String()), {1}, {2}, {3}, {4}}})
+
+	reply := awaitErrorReply(t, socket, noisy.String())
+	if !strings.Contains(reply.Meta.Error, "frames") {
+		t.Fatalf("error reply = %q, want it to say the frame count was wrong", reply.Meta.Error)
+	}
+
+	// A message too short to be a request is answerable for the same reason.
+	socket.push(stubControlEvent{frames: [][]byte{[]byte(noisy.String()), {1}}})
+	if len(socket.repliesTo(noisy.String())) == 0 {
+		t.Fatal("precondition: the first refusal should already be recorded")
+	}
+
+	serveNextClient(t, socket, testCID(t, "client-next"), pty)
+
+	select {
+	case err, ok := <-server.Errors():
+		t.Fatalf("control server reported err=%v (open=%t); one bad message must not be fatal", err, ok)
+	default:
+	}
+}
+
+// TestControlServerSurvivesAClientThatStopsTakingDelivery covers the hang that
+// outlived the crash fix. ROUTER.Send takes a context.Context and never reads
+// it, and under the driver's default blocking overflow policy a peer that fills
+// its queue parks the sender until the socket closes. One such client used to
+// stop the whole loop: no receives, no lease reaping, nobody else served, and
+// ControlServer.Close blocked forever on <-s.done.
+func TestControlServerSurvivesAClientThatStopsTakingDelivery(t *testing.T) {
+	// A lease long enough that only the drop path can free it. With the default
+	// test lease the reaper would release it on a timer and the assertion below
+	// would pass without the code under test doing anything at all.
+	runtime, pty, _ := newTestRuntimeWith(t, protocol.DefaultStoreLimits(), time.Hour)
+	stuck := testCID(t, "web-e91ea4799bb00e0ac4b18599")
+	next := testCID(t, "client-next")
+	if _, err := runtime.AttachSnapshot(stuck); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.AcquireControl(stuck); err != nil {
+		t.Fatal(err)
+	}
+	if owner := runtime.Status().ControlOwner; owner != stuck.String() {
+		t.Fatalf("control owner = %q, want %q", owner, stuck)
+	}
+
+	socket := newStubControlSocket()
+	socket.stall(stuck.String())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server := newControlServer(ctx, socket, "test", runtime, stubReadyWaiter{})
+	// Close the socket first: that is what frees a send parked in the driver,
+	// so it is also what lets the loop finish and Close return.
+	defer func() {
+		_ = socket.Close()
+		_ = server.Close()
+	}()
+
+	// Two requests. The first must not hold the loop forever; the second must
+	// not park a second goroutine behind the first.
+	socket.deliver(t, stuck.String(), protocol.Message{Kind: protocol.KindPing, Meta: protocol.Meta{Version: protocol.Version, Session: "test", RequestID: 1}})
+	socket.deliver(t, stuck.String(), protocol.Message{Kind: protocol.KindPing, Meta: protocol.Meta{Version: protocol.Version, Session: "test", RequestID: 2}})
+
+	// A client that has stopped reading is a client that is gone, so it goes
+	// through the same teardown, and the exclusive lease it was holding comes
+	// back. Generous against a slow machine: the bound itself is 2s.
+	deadline := time.Now().Add(10 * time.Second)
+	for runtime.Status().ControlOwner != "" && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if owner := runtime.Status().ControlOwner; owner != "" {
+		t.Fatalf("control lease still owned by %q after that client stopped taking delivery", owner)
+	}
+
+	serveNextClient(t, socket, next, pty)
+
+	if got := socket.sendAttempts(stuck.String()); got != 1 {
+		t.Fatalf("the loop parked %d sends on one client that stopped reading; want 1, or every request it keeps sending costs another goroutine", got)
+	}
+
+	select {
+	case err, ok := <-server.Errors():
+		t.Fatalf("control server reported err=%v (open=%t); one stalled client must not be fatal", err, ok)
 	default:
 	}
 }
@@ -372,7 +545,7 @@ func TestControlServerSurvivesAReplyItCannotEncode(t *testing.T) {
 	// An error string past the protocol's payload ceiling cannot be encoded,
 	// so replyError fails at protocol.Encode rather than at the socket.
 	unencodable := strings.Repeat("x", protocol.MaxPayloadSize+1)
-	err := sendControl(newStubControlSocket(), []byte("client-a"), protocol.Message{
+	err := sendControl(newBoundedSender(newStubControlSocket()), []byte("client-a"), protocol.Message{
 		Kind: protocol.KindError,
 		Meta: protocol.Meta{Version: protocol.Version, Session: "test", Error: unencodable},
 	})

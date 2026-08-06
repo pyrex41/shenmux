@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sync/atomic"
 	"time"
 
 	"github.com/pyrex41/shenmux/internal/protocol"
@@ -22,6 +23,47 @@ const (
 	// loop; this only guards against a future receive failure that repeats
 	// without consuming anything.
 	maxConsecutiveRecvReject = 64
+
+	// maxControlFrames is what a well-formed control message carries: the one
+	// ROUTER identity frame plus protocol.Encode's two or three frames.
+	maxControlFrames = 4
+
+	// maxControlRecvFrames is deliberately looser than maxControlFrames. The
+	// receive path refuses an over-long message *after* consuming it, returning
+	// an error and no frames at all, so a message refused there cannot be
+	// answered -- there is no identity left to answer. Receiving with slack and
+	// enforcing the real limit in handleControl, where the identity has been
+	// read, turns the commonest malformed message into a KindError the sender
+	// can act on. It costs no memory: the driver has already read the whole
+	// message by the time zmqx counts its frames, so this cap decides who we can
+	// answer, not how much we hold.
+	maxControlRecvFrames = 8
+
+	// controlSendDeadline bounds how long one reply may hold the control loop.
+	//
+	// It sits between two facts. A client that is merely busy -- a backgrounded
+	// browser tab, a laptop resuming from sleep -- drains a local IPC pipe in
+	// milliseconds and cannot fill a 10_000-message queue at all unless it has
+	// stopped reading altogether, so blocking here already means "not taking
+	// delivery" rather than "slow". On the other side this loop is the only
+	// thing that reaps expired control leases and serves every other client, so
+	// the wait is a hard cap on how long everybody else is stalled. Two seconds
+	// is far past any scheduling hiccup, is the same order as the WaitReady
+	// timeout a client already tolerates on attach, and stays well inside
+	// DefaultControlLease (8s) so a stalled peer cannot delay reaping past the
+	// lease it is holding. It is paid at most once per peer, because
+	// boundedSender refuses to park a second send behind a stalled one.
+	controlSendDeadline = 2 * time.Second
+
+	// maxParkedSends caps how many replies may sit in the driver at once after
+	// the loop has given up on them. It is the backstop for the per-peer rule
+	// below, which cannot cover a peer that keeps presenting fresh identities.
+	maxParkedSends = 64
+
+	// maxStalledPeers caps the per-peer memory of stalled sends. The memo is an
+	// optimisation -- maxParkedSends is what actually bounds the goroutines --
+	// so refusing to grow it past this point is safe.
+	maxStalledPeers = 1024
 )
 
 // controlSocket is the ROUTER surface the control loop uses. *zmqx.Socket
@@ -70,19 +112,140 @@ type encodeFault struct{ err error }
 func (e *encodeFault) Error() string { return "encode control reply: " + e.err.Error() }
 func (e *encodeFault) Unwrap() error { return e.err }
 
+// errPeerNotDraining marks a reply the addressed peer never took delivery of.
+// It is the same condition as a missing route -- a client that is not receiving
+// -- reached from the other side: the peer still has a pipe, it has simply
+// stopped emptying it. peerGone treats the two alike so there is one concept
+// here ("the client is gone, clean up after it") rather than two.
+var errPeerNotDraining = errors.New("control client is not taking delivery")
+
 // peerGone reports whether a control-plane send failed because the addressed
-// peer is no longer connected, as opposed to because the socket is unusable.
+// peer is no longer taking delivery, as opposed to because the socket is
+// unusable.
 //
-// This is a sentinel comparison, not a message match: zmq4 declares ErrNoRoute
-// and ErrNoIdentity as package-level errors, and ROUTER.Send wraps ErrNoRoute
-// with %w when no pipe carries the requested identity. That wrapped value is
-// exactly the "zmq4: no route to peer: identity web-..." failure that used to
-// take a whole session down. Every other ROUTER.Send failure is zmq4.ErrClosed,
-// because the pure-Go ROUTER queues with a blocking overflow policy and only
-// refuses a message once the socket itself is closing; zmqx maps that to
-// zmqx.ErrClosed, which stays fatal here.
+// For the routing failures this is a sentinel comparison, not a message match:
+// zmq4 declares ErrNoRoute and ErrNoIdentity as package-level errors, and
+// ROUTER.Send wraps ErrNoRoute with %w when no pipe carries the requested
+// identity. That wrapped value is exactly the "zmq4: no route to peer: identity
+// web-..." failure that used to take a whole session down. Every other
+// ROUTER.Send failure is zmq4.ErrClosed, because the pure-Go ROUTER queues with
+// a blocking overflow policy and only refuses a message once the socket itself
+// is closing; zmqx maps that to zmqx.ErrClosed, which stays fatal here.
+//
+// errPeerNotDraining is our own: a peer whose queue is full never produces a
+// zmq4 error at all, it just parks the sender forever (see boundedSender).
 func peerGone(err error) bool {
-	return errors.Is(err, zmqx.ErrNoRoute) || errors.Is(err, zmqx.ErrNoIdentity)
+	return errors.Is(err, zmqx.ErrNoRoute) ||
+		errors.Is(err, zmqx.ErrNoIdentity) ||
+		errors.Is(err, errPeerNotDraining)
+}
+
+// boundedSender is the control loop's only way onto the socket. It exists
+// because the ROUTER underneath cannot be told to give up. zmq4's ROUTER.Send
+// takes a context.Context and never reads it; under the driver's default
+// blocking overflow policy a full per-peer queue parks the caller on the
+// socket's own close channel. One client that stops reading would therefore
+// stop receives, lease reaping and every other client, and ControlServer.Close
+// would block forever on <-s.done. The two obvious repairs do not work: the
+// Drop overflow policy reports a dropped message as zmq4.ErrClosed, which we
+// must classify as fatal, and zmqx.SendMultipartContext hands its context to
+// the same call that discards it.
+//
+// So the bound lives here. Each send runs on its own goroutine; the loop waits
+// controlSendDeadline for it and otherwise walks away with errPeerNotDraining,
+// which peerGone reports as a departed peer so the existing dropClient path
+// detaches the client and frees its control lease.
+//
+// The goroutine outlives the deadline. That is the honest cost of a driver with
+// no cancellable send: it stays parked until the peer drains or the socket
+// closes, and its result is discarded because the client it belonged to has
+// already been dropped. Two rules keep those from accumulating:
+//
+//   - a peer whose previous send is still parked is never given a second one,
+//     so a stalled client costs one goroutine and one deadline, not one per
+//     request it keeps sending; the memo clears itself as soon as that send
+//     finally returns, so a peer that recovers is served again;
+//   - at most maxParkedSends may be parked at once whatever identities they
+//     were addressed to, which is the backstop for a peer that reconnects
+//     under fresh identities faster than the memo can name them.
+//
+// Only the control loop goroutine calls send, so stalled needs no lock; parked
+// is atomic because the send goroutines decrement it.
+type boundedSender struct {
+	socket  controlSocket
+	parked  atomic.Int64
+	stalled map[string]chan error
+}
+
+func newBoundedSender(socket controlSocket) *boundedSender {
+	return &boundedSender{socket: socket, stalled: make(map[string]chan error)}
+}
+
+// send delivers frames to identity, or gives up after controlSendDeadline.
+func (b *boundedSender) send(identity []byte, frames [][]byte) error {
+	if b.isStalled(string(identity)) {
+		return fmt.Errorf("%w: an earlier reply is still queued for it", errPeerNotDraining)
+	}
+	if b.parked.Load() >= maxParkedSends {
+		return fmt.Errorf("%w: %d replies are already parked in the socket", errPeerNotDraining, maxParkedSends)
+	}
+	// Buffered, because this goroutine must never block on a reader that has
+	// already given up on it.
+	done := make(chan error, 1)
+	b.parked.Add(1)
+	go func() {
+		err := b.socket.SendMultipart(frames, 0)
+		b.parked.Add(-1)
+		done <- err
+	}()
+	timer := time.NewTimer(controlSendDeadline)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		b.remember(string(identity), done)
+		return fmt.Errorf("%w after %s", errPeerNotDraining, controlSendDeadline)
+	}
+}
+
+// isStalled reports whether an earlier send to identity is still parked, and
+// forgets the peer once that send has returned.
+func (b *boundedSender) isStalled(identity string) bool {
+	done, known := b.stalled[identity]
+	if !known {
+		return false
+	}
+	select {
+	case <-done:
+		delete(b.stalled, identity)
+		return false
+	default:
+		return true
+	}
+}
+
+func (b *boundedSender) remember(identity string, done chan error) {
+	if len(b.stalled) >= maxStalledPeers {
+		b.forgetFinished()
+	}
+	if len(b.stalled) >= maxStalledPeers {
+		return
+	}
+	b.stalled[identity] = done
+}
+
+// forgetFinished drops the peers whose parked send has since returned. It runs
+// only when the memo is at its cap, which needs a client population large
+// enough that the parked-send cap is doing the real work anyway.
+func (b *boundedSender) forgetFinished() {
+	for identity, done := range b.stalled {
+		select {
+		case <-done:
+			delete(b.stalled, identity)
+		default:
+		}
+	}
 }
 
 // dropClient runs, for a client that vanished mid-reply, the same teardown a
@@ -161,6 +324,15 @@ func newControlServer(
 // Errors carries only failures that invalidate the server itself, such as the
 // bound socket closing. Callers end the session on anything received here, so a
 // failure attributable to a single client must never be sent down this channel.
+//
+// One client-visible outcome is deliberately reported nowhere, here or to the
+// client: a message the receive path refuses outright -- more than
+// maxControlRecvFrames frames, or a frame larger than protocol.MaxPayloadSize
+// -- is consumed before zmqx will hand it back, so no ROUTER identity survives
+// to answer it. Such a message is logged and dropped, and its sender gets no
+// reply and must fall back on its own request timeout. Everything the receive
+// path does hand back is answered, including a malformed frame count, which
+// handleControl turns into a KindError.
 func (s *ControlServer) Errors() <-chan error { return s.err }
 
 func (s *ControlServer) Close() error {
@@ -195,10 +367,11 @@ func (s *ControlServer) run(
 		default:
 		}
 	}
+	sender := newBoundedSender(socket)
 	rejects := 0
 	for {
 		for {
-			frames, err := socket.RecvMultipartLimit(zmqx.DontWait, protocol.MaxPayloadSize, 4)
+			frames, err := socket.RecvMultipartLimit(zmqx.DontWait, protocol.MaxPayloadSize, maxControlRecvFrames)
 			if errors.Is(err, zmqx.ErrWouldBlock) {
 				break
 			}
@@ -221,11 +394,12 @@ func (s *ControlServer) run(
 				continue
 			}
 			rejects = 0
-			if err := handleControl(ctx, socket, frames, session, runtime, publisher); err != nil {
+			if err := handleControl(ctx, sender, frames, session, runtime, publisher); err != nil {
 				// Per-request failures are encoded for that client, so only an
 				// inability to send a response reaches this branch. A reply that
-				// cannot be routed means that one peer has gone: tear its client
-				// down and keep serving everyone else.
+				// cannot be routed, or that the peer never takes delivery of,
+				// means that one peer has gone: tear its client down and keep
+				// serving everyone else.
 				var fault *clientFault
 				if errors.As(err, &fault) {
 					dropClient(runtime, fault)
@@ -250,15 +424,16 @@ func (s *ControlServer) run(
 
 func handleControl(
 	ctx context.Context,
-	socket controlSocket,
+	sender *boundedSender,
 	frames [][]byte,
 	session string,
 	runtime *Runtime,
 	publisher readyWaiter,
 ) error {
-	if len(frames) < 3 || len(frames) > 4 {
-		// ROUTER prepends exactly one identity frame to the 2-3 protocol
-		// frames. Ignore malformed messages that cannot be replied to safely.
+	if len(frames) == 0 {
+		// Unreachable from a ROUTER, which always prepends an identity frame,
+		// and the one case where there is genuinely nobody to answer.
+		log.Print("shenmux control: discarded a control message with no frames")
 		return nil
 	}
 	identity := append([]byte(nil), frames[0]...)
@@ -269,7 +444,7 @@ func handleControl(
 	// its request and receiving its answer surfaces as a clientFault -- one dead
 	// client -- rather than as a server failure that ends the session.
 	reply := func(msg protocol.Message) error {
-		err := sendControl(socket, identity, msg)
+		err := sendControl(sender, identity, msg)
 		if err == nil {
 			return nil
 		}
@@ -295,6 +470,14 @@ func handleControl(
 		return replyError(0, fmt.Errorf("invalid ROUTER identity: %w", err))
 	}
 	cid = parsed
+	if len(frames) < 3 || len(frames) > maxControlFrames {
+		// The frame count is checked here rather than at the socket because
+		// frames[0] is the sender's identity: a message we can count is a
+		// message we can answer, and a client left waiting on a request it
+		// malformed learns nothing from the silence.
+		return replyError(0, fmt.Errorf(
+			"control message carries %d frames; want a ROUTER identity plus 2 or 3 protocol frames", len(frames)))
+	}
 	msg, err := protocol.Decode(frames[1:])
 	if err != nil {
 		return replyError(0, err)
@@ -388,10 +571,10 @@ func controlAck(session string, cid shenguard.ClientID, requestID uint64, runtim
 	}
 }
 
-func sendControl(socket controlSocket, identity []byte, msg protocol.Message) error {
+func sendControl(sender *boundedSender, identity []byte, msg protocol.Message) error {
 	frames, err := protocol.Encode(msg)
 	if err != nil {
 		return &encodeFault{err: err}
 	}
-	return socket.SendMultipart(append([][]byte{identity}, frames...), 0)
+	return sender.send(identity, append([][]byte{identity}, frames...))
 }
