@@ -52,6 +52,20 @@ spec:
                     cpuLimit:
                       type: string
                       default: "256"
+                openbao:
+                  type: object
+                  description: >-
+                    OpenBao source of truth for harness credentials. The
+                    Composition creates a Kubernetes auth role and policy per
+                    harness mapping the worker ServiceAccount to its secret
+                    path; the secret-proxy sidecar fetches the real value at
+                    runtime and holds it in memory only.
+                  properties:
+                    address:
+                      type: string
+                    secretPathPrefix:
+                      type: string
+                      default: secret/data/harness
                 shenmuxControllerURL:
                   type: string
                   description: >-
@@ -71,3 +85,6 @@ spec:
     retentionDays: 60
   nodePool:
     capacityTypes: [spot, on-demand]
+  openbao:
+    address: https://openbao.openbao.svc:8200
+    secretPathPrefix: secret/data/harness

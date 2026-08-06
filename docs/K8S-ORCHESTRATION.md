@@ -403,6 +403,78 @@ If fan-out beyond the cluster ever matters (many external observers,
 cross-cluster fleets), a broker like NATS can mirror the watch stream —
 an addition behind the same event schema, not a replacement.
 
+## Credential interception
+
+The CLI harnesses (codex, pi, opencode) need a *real* provider API key live
+in-process, and they run with their own permission prompts disabled — so a
+prompt-injected agent can read its own environment and try to exfiltrate the
+key. A secret store alone does not fix this: however short-lived the key,
+once it lands in the harness container the agent can read it. The fix is to
+ensure **the agent never holds the real secret at all**, adapting the
+sq-sandbox secret proxy (`impl/go/proxy/proxy.go`) to the pod.
+
+**The placeholder swap.** The harness container is injected with a
+*placeholder* token — `ANTHROPIC_API_KEY=sk-placeholder-…` — never the real
+value. A **secret-proxy sidecar** is the pod's sole egress. On each outbound
+request it substitutes the real secret for the placeholder, and only:
+
+- in a fixed allow-list of auth headers (`Authorization`, `X-Api-Key`,
+  `Api-Key`, `X-Auth-Token`, `X-Access-Token`, `Proxy-Authorization`) and
+  HTTP Basic credentials — never the request body, to narrow the exfil
+  surface;
+- when the destination host is in *that secret's* `allowed_hosts`
+  (e.g. `api.anthropic.com`). For an allowed host the proxy does a MITM with
+  a per-host cert signed by a pod-local CA the harness trusts; any other
+  host gets a blind TCP tunnel with no inspection, so the placeholder (never
+  the real key) transits and reaches nothing useful.
+
+Because the swap is host-gated, a compromised agent cannot redirect the key
+to an attacker endpoint, and because the agent only ever held a placeholder,
+there is nothing real to leak in the first place.
+
+**Harness trust setup** (from sq-sandbox's `injectSecrets`, adapted):
+`HTTPS_PROXY=http://localhost:8888` (the sidecar shares the pod network
+namespace, so `localhost`, not sq-sandbox's slirp `10.0.2.2`); the proxy CA
+appended to the system bundle plus `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`,
+`SSL_CERT_FILE` so Node, Python, curl, and git all trust it.
+
+**What Kubernetes fixes.** sq-sandbox proxies via `HTTP_PROXY` env vars only,
+so a program that ignores them and dials a raw IP bypasses the proxy — its
+own README flags this. In the pod we make the proxy the sole egress at
+L3/L4, not by convention. The subtlety: all containers in a pod share one
+network namespace, so a `NetworkPolicy` (which is pod-scoped) cannot on its
+own stop the harness from dialing `:443` directly past a sidecar proxy.
+Enforcement is therefore an **init container that installs an iptables
+owner-match redirect** (the transparent-proxy pattern, as Istio's init does):
+the harness UID's outbound TCP is redirected to `127.0.0.1:8888` and its
+direct egress is dropped, so ignoring `HTTPS_PROXY` fails closed. A
+pod-level default-deny `NetworkPolicy` (DNS + the proxy's own `:443`
+upstream) is the outer layer. (Also fix sq-sandbox's exact-match
+`allowed_hosts` to real suffix matching — its `*.github.com` examples never
+actually matched.)
+
+**Where the real value comes from: OpenBao.** sq-sandbox keeps the real
+value in a host-side `secrets.json`. Here the proxy sidecar instead fetches
+it from **OpenBao** at startup using the pod's ServiceAccount JWT (OpenBao's
+Kubernetes auth method), holds it in memory only, and never writes it to
+disk or into the harness container. This buys what a static file cannot:
+
+- ServiceAccount identity → policy mapping, so a worker only obtains the
+  secrets its harness/namespace is entitled to — the same CR-RBAC identity
+  used everywhere else in this design;
+- leased, dynamic, and revocable credentials — rotate or kill a key
+  fleet-wide via OpenBao without touching pods, and leases expire on their
+  own;
+- secrets delivered to ephemeral in-memory volumes (OpenBao's agent
+  injector / CSI provider), never at rest in the cluster.
+
+The in-pod secret config the proxy reads carries only `placeholder`,
+`allowed_hosts`, and an OpenBao **path reference** per secret — never a
+value. The real secret lives in exactly one place at runtime: the proxy
+sidecar's memory. `claude-managed` needs none of this — its key stays on
+Anthropic's side by construction — so the proxy sidecar is attached only to
+CLI-harness workers.
+
 ## Security posture
 
 - **Isolation**: default pod isolation is weaker than the microVMs the
@@ -417,11 +489,12 @@ an addition behind the same event schema, not a replacement.
   sandbox, egress policy, and shenmux control leases are therefore the
   *only* effective controls — design them as such.
 - **Credentials**: `claude-managed` keeps the org key out of the cluster by
-  design; the CLI harnesses cannot — they need live provider credentials in
-  the pod. Mitigate by routing them through an LLM gateway (so pods hold
-  only short-lived gateway credentials) or per-worker scoped keys, mounted
-  as Secret files, never argv. Assume anything in `/state` is readable by
-  the task the agent executes.
+  design; the CLI harnesses cannot hold nothing, but they can hold only a
+  *placeholder* — the real value lives solely in the secret-proxy sidecar's
+  memory, sourced from OpenBao and injected on egress for allow-listed hosts
+  (see Credential interception). Assume anything in `/state`, and any real
+  value ever placed in the harness container, is readable by the task the
+  agent executes — which is exactly why the real value is never placed there.
 - **shenmux trust boundary**: the controller/agent path is currently a
   development path — trusted browser only, no production identity, and
   controller restarts drop live connections (agents reconnect). The fleet
@@ -457,9 +530,11 @@ around what it should *not* do:
 1. **Environment stamping.** An `AgentEnvironment` XRD + Composition
    renders everything a fleet needs as one claim: the namespace and
    quotas, the checkpoint bucket and its IAM/IRSA binding for the
-   snapshot agent, per-harness credential secrets, the Karpenter
-   `NodePool`, default-deny NetworkPolicies, and the shenmux controller
-   install. One claim = one ready fleet environment; per-team or
+   snapshot agent, the OpenBao Kubernetes auth role and policies that map
+   each harness's ServiceAccount to its provider secret (see Credential
+   interception), the Karpenter `NodePool`, default-deny NetworkPolicies,
+   and the shenmux controller install. One claim = one ready fleet
+   environment; per-team or
    per-cluster fleets become claim-per-team, and the cloud-side pieces
    (bucket, IAM) stay continuously reconciled by Crossplane's providers
    in the same GitOps flow as the workers. This is Crossplane's sweet
@@ -506,6 +581,15 @@ New components (this repo or a sibling):
 7. The `muxwork` CLI and the operator's HTTP facade for
    execution-backend calls (both thin clients of the CR API and operator;
    no separate orchestration service).
+8. **Secret-proxy** image (MITM credential injector, adapted from
+   sq-sandbox with suffix host-matching and an OpenBao fetch for the real
+   value) plus the init-container iptables redirect that makes it sole
+   egress; OpenBao Kubernetes auth roles/policies per harness.
+
+A runnable local reference of items 4, 7, and 8 — the operator loop,
+`muxwork`, the secret-proxy, and content-addressed checkpoint/fork — lives
+in [`orchestrator/`](../orchestrator/), running the architecture as OS
+processes instead of pods. See its README and `demo/demo.sh`.
 
 Karpenter itself is off-the-shelf; the design only adds a `NodePool` and
 interruption-aware suspend handling in the operator.
@@ -520,9 +604,10 @@ interruption-aware suspend handling in the operator.
   everything later builds against. No operator yet.
 - **Phase 1 — durable/resumable.** `AgentWorker` CRD + operator with
   spawn/suspend/resume in pvc mode; enrollment-mint API in the controller;
-  the `AgentEnvironment` Crossplane Composition for environment stamping,
-  and the decision on whether worker provisioning stays in the operator or
-  moves to a Composition.
+  the secret-proxy sidecar + iptables-redirect init container with OpenBao
+  as the value source; the `AgentEnvironment` Crossplane Composition for
+  environment stamping, and the decision on whether worker provisioning
+  stays in the operator or moves to a Composition.
 - **Phase 2 — forkable + managed.** Overlay mode: snapshot-agent DaemonSet,
   checkpoint store, fork-from-checkpoint, Spot-friendly interruption
   handling on a Karpenter `NodePool`; CSI `VolumeSnapshot` clone remains

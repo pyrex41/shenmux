@@ -42,6 +42,23 @@ spec:
       volumeMounts:
         - name: shenmux-ipc
           mountPath: /run/shenmux
+    # Transparent-proxy enforcement: redirect the harness UID's egress to the
+    # secret-proxy and drop its direct egress, so the proxy is the only way
+    # out even if the harness ignores HTTPS_PROXY. Runs once, needs NET_ADMIN.
+    - name: egress-redirect
+      image: ghcr.io/pyrex41/shenmux-secret-proxy:latest
+      command:
+        - sh
+        - -c
+        - |
+          iptables -t nat -A OUTPUT -p tcp -m owner --uid-owner 999 \
+            ! -d 127.0.0.1 -j REDIRECT --to-ports 8888
+          iptables -A OUTPUT -p tcp -m owner --uid-owner 999 \
+            ! -o lo -m tcp --dport 443 -j DROP
+      securityContext:
+        runAsUser: 0
+        capabilities:
+          add: [NET_ADMIN]
   containers:
     - name: harness
       image: ghcr.io/pyrex41/shenmux-worker-codex:latest
@@ -65,13 +82,50 @@ spec:
       env:
         - name: HOME
           value: /state/home
+        # The harness holds ONLY a placeholder; the real key is swapped in by
+        # the secret-proxy sidecar for allow-listed hosts. See
+        # docs/K8S-ORCHESTRATION.md "Credential interception".
+        - name: ANTHROPIC_API_KEY
+          value: sk-placeholder-anthropic
+        - name: HTTPS_PROXY
+          value: http://localhost:8888
+        - name: HTTP_PROXY
+          value: http://localhost:8888
+        - name: NODE_EXTRA_CA_CERTS
+          value: /state/proxy-ca/ca.crt
+        - name: REQUESTS_CA_BUNDLE
+          value: /state/proxy-ca/ca.crt
+        - name: SSL_CERT_FILE
+          value: /state/proxy-ca/ca.crt
       volumeMounts:
         - name: state
           mountPath: /state
         - name: shenmux-ipc
           mountPath: /run/shenmux
-        - name: credentials
-          mountPath: /state/home/.credentials
+        - name: proxy-ca
+          mountPath: /state/proxy-ca
+          readOnly: true
+    # Sole egress for the harness: swaps the placeholder for the real secret
+    # (fetched from OpenBao, held in memory only) in auth headers, and only
+    # for hosts in that secret's allowed_hosts. NetworkPolicy below makes this
+    # the only route out, so ignoring HTTPS_PROXY fails closed.
+    - name: secret-proxy
+      image: ghcr.io/pyrex41/shenmux-secret-proxy:latest
+      args: ["--listen", "127.0.0.1:8888", "--secrets", "/etc/sq/secrets.json", "--ca-dir", "/state/proxy-ca"]
+      env:
+        # OpenBao Kubernetes auth: the sidecar exchanges the pod's
+        # ServiceAccount token for a short-lived token, reads the real value,
+        # keeps it in memory. secrets.json carries placeholder + allowed_hosts
+        # + bao path only — never a value.
+        - name: BAO_ADDR
+          value: https://openbao.openbao.svc:8200
+        - name: BAO_K8S_ROLE
+          value: harness-codex
+      volumeMounts:
+        - name: proxy-ca
+          mountPath: /state/proxy-ca
+        - name: secrets-config
+          mountPath: /etc/sq
           readOnly: true
     - name: shenmux-agent
       image: ghcr.io/pyrex41/shenmux-worker-codex:latest
@@ -123,12 +177,22 @@ spec:
         claimName: worker-fix-flaky-tests
     - name: shenmux-ipc
       emptyDir: {}
-    - name: credentials
+    # CA the proxy generates and the harness trusts; shared in-pod.
+    - name: proxy-ca
+      emptyDir: {}
+    # Placeholder + allowed_hosts + OpenBao path per secret — never a value.
+    - name: secrets-config
       secret:
-        secretName: harness-codex-credentials
+        secretName: worker-fix-flaky-tests-secrets-config
 ---
-# Default-deny egress; allow DNS plus the provider endpoints this harness
-# needs. Tighten per environment.
+# Pod-level default-deny egress: DNS, plus :443 for the SECRET-PROXY's
+# upstream calls. NOTE: all containers in a pod share one network namespace,
+# so NetworkPolicy cannot by itself stop the harness from dialing :443
+# directly and bypassing the proxy. Sole-egress is enforced in-pod by the
+# init container below (iptables owner-match redirect, the transparent-proxy
+# pattern): the harness UID's egress is redirected to 127.0.0.1:8888 and
+# direct egress from that UID is dropped, so ignoring HTTPS_PROXY fails
+# closed. This NetworkPolicy is the outer belt-and-suspenders.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
