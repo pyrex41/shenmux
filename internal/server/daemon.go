@@ -146,6 +146,7 @@ func Serve(ctx context.Context, cfg Config) error {
 	writerErrors := runtime.WriterErrors()
 	publisherErrors := runtime.PublisherErrors()
 	fatalErrors := runtime.FatalErrors()
+	controlErrors := control.Errors()
 	for proc == nil || !readFinished {
 		select {
 		case <-ctx.Done():
@@ -164,8 +165,17 @@ func Serve(ctx context.Context, cfg Config) error {
 			if err != nil {
 				return err
 			}
-		case err, ok := <-control.Errors():
-			if ok && err != nil {
+		case err, ok := <-controlErrors:
+			if !ok {
+				// A closed channel stays ready forever and would spin this loop.
+				controlErrors = nil
+				continue
+			}
+			// The control server reports only failures that invalidate it, such
+			// as its socket closing. A client that vanishes is torn down there
+			// and never reaches this channel, so ending the session here does not
+			// cost everyone else their shell.
+			if err != nil {
 				return fmt.Errorf("control server: %w", err)
 			}
 		case err, ok := <-writerErrors:

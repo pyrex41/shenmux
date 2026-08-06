@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/pyrex41/shenmux/internal/protocol"
@@ -14,7 +15,84 @@ import (
 const (
 	controlPollInterval = 2 * time.Millisecond
 	leasePollInterval   = 250 * time.Millisecond
+
+	// maxConsecutiveRecvReject bounds how many unreadable control messages in a
+	// row the loop tolerates before it stops trusting the receive path itself.
+	// Each reject consumes exactly one message, so no client can live-lock the
+	// loop; this only guards against a future receive failure that repeats
+	// without consuming anything.
+	maxConsecutiveRecvReject = 64
 )
+
+// controlSocket is the ROUTER surface the control loop uses. *zmqx.Socket
+// satisfies it. Tests substitute a stub, because a reply that cannot be routed
+// to a departed peer is otherwise only reachable by winning a race against
+// that peer's disconnect.
+type controlSocket interface {
+	SendMultipart(frames [][]byte, flags int) error
+	RecvMultipartLimit(flags, maxFrame, maxFrames int) ([][]byte, error)
+	Close() error
+}
+
+// readyWaiter is the publisher surface the control loop uses: it blocks until a
+// client's data-plane subscription is live, so an attach snapshot is never cut
+// before the client can receive the deltas that follow it.
+type readyWaiter interface {
+	WaitReady(ctx context.Context, cid shenguard.ClientID) error
+}
+
+// clientFault is a control-plane failure confined to one client: the request
+// was handled, but the reply could not be routed because that peer is gone.
+// It is deliberately not fatal. Anything reaching ControlServer.Errors ends the
+// session -- shell, scrollback and all -- so only failures that genuinely
+// invalidate the server may travel that way.
+type clientFault struct {
+	client shenguard.ClientID // zero when the peer presented no usable identity
+	err    error
+}
+
+func (f *clientFault) Error() string {
+	if f.client.IsZero() {
+		return fmt.Sprintf("control client: %v", f.err)
+	}
+	return fmt.Sprintf("control client %s: %v", f.client, f.err)
+}
+
+func (f *clientFault) Unwrap() error { return f.err }
+
+// peerGone reports whether a control-plane send failed because the addressed
+// peer is no longer connected, as opposed to because the socket is unusable.
+//
+// This is a sentinel comparison, not a message match: zmq4 declares ErrNoRoute
+// and ErrNoIdentity as package-level errors, and ROUTER.Send wraps ErrNoRoute
+// with %w when no pipe carries the requested identity. That wrapped value is
+// exactly the "zmq4: no route to peer: identity web-..." failure that used to
+// take a whole session down. Every other ROUTER.Send failure is zmq4.ErrClosed,
+// because the pure-Go ROUTER queues with a blocking overflow policy and only
+// refuses a message once the socket itself is closing; zmqx maps that to
+// zmqx.ErrClosed, which stays fatal here.
+func peerGone(err error) bool {
+	return errors.Is(err, zmqx.ErrNoRoute) || errors.Is(err, zmqx.ErrNoIdentity)
+}
+
+// dropClient runs, for a client that vanished mid-reply, the same teardown a
+// clean detach runs. Runtime.Detach removes the client from the session and,
+// through the Shen rule mux.detach -> mux.release-if-owner, releases the
+// exclusive control lease when that client held it. Without that release a
+// departed browser tab leaves the lease parked on a client id nobody can reach
+// and no later client can type -- the same wedge internal/agent/bridge.go
+// fixes one layer up.
+func dropClient(runtime *Runtime, fault *clientFault) {
+	if fault.client.IsZero() {
+		log.Printf("shenmux control: discarded a reply to an unidentified client: %v", fault.err)
+		return
+	}
+	if err := runtime.Detach(fault.client); err != nil && !errors.Is(err, shenguard.ErrNotAttached) {
+		log.Printf("shenmux control: client %s went away, detach failed: %v", fault.client, err)
+		return
+	}
+	log.Printf("shenmux control: dropped client %s after a failed reply: %v", fault.client, fault.err)
+}
 
 type ControlServer struct {
 	cancel context.CancelFunc
@@ -53,12 +131,26 @@ func NewControlServer(
 	if err := socket.Bind(endpoint); err != nil {
 		return cleanup(err)
 	}
+	return newControlServer(parent, socket, session, runtime, publisher), nil
+}
+
+// newControlServer starts the control loop over an already-bound socket.
+func newControlServer(
+	parent context.Context,
+	socket controlSocket,
+	session string,
+	runtime *Runtime,
+	publisher readyWaiter,
+) *ControlServer {
 	ctx, cancel := context.WithCancel(parent)
 	server := &ControlServer{cancel: cancel, done: make(chan struct{}), err: make(chan error, 1)}
 	go server.run(ctx, socket, session, runtime, publisher)
-	return server, nil
+	return server
 }
 
+// Errors carries only failures that invalidate the server itself, such as the
+// bound socket closing. Callers end the session on anything received here, so a
+// failure attributable to a single client must never be sent down this channel.
 func (s *ControlServer) Errors() <-chan error { return s.err }
 
 func (s *ControlServer) Close() error {
@@ -74,10 +166,10 @@ func (s *ControlServer) Close() error {
 
 func (s *ControlServer) run(
 	ctx context.Context,
-	socket *zmqx.Socket,
+	socket controlSocket,
 	session string,
 	runtime *Runtime,
-	publisher *ZMQPublisher,
+	publisher readyWaiter,
 ) {
 	defer close(s.done)
 	defer close(s.err)
@@ -93,6 +185,7 @@ func (s *ControlServer) run(
 		default:
 		}
 	}
+	rejects := 0
 	for {
 		for {
 			frames, err := socket.RecvMultipartLimit(zmqx.DontWait, protocol.MaxPayloadSize, 4)
@@ -100,12 +193,34 @@ func (s *ControlServer) run(
 				break
 			}
 			if err != nil {
-				fail(err)
-				return
+				// Only a dead socket invalidates this server. Every other error
+				// the receive path can produce here describes a message that was
+				// received and then refused -- too many frames, or a frame over
+				// the payload limit -- which is one client's fault and must not
+				// end the session for everybody.
+				if errors.Is(err, zmqx.ErrClosed) {
+					fail(err)
+					return
+				}
+				rejects++
+				if rejects > maxConsecutiveRecvReject {
+					fail(fmt.Errorf("control receive failed %d times consecutively: %w", rejects, err))
+					return
+				}
+				log.Printf("shenmux control: dropped an unreadable control message: %v", err)
+				continue
 			}
+			rejects = 0
 			if err := handleControl(ctx, socket, frames, session, runtime, publisher); err != nil {
-				// Per-request failures are encoded for that client. Only inability
-				// to send a response reaches this branch.
+				// Per-request failures are encoded for that client, so only an
+				// inability to send a response reaches this branch. A reply that
+				// cannot be routed means that one peer has gone: tear its client
+				// down and keep serving everyone else.
+				var fault *clientFault
+				if errors.As(err, &fault) {
+					dropClient(runtime, fault)
+					continue
+				}
 				fail(err)
 				return
 			}
@@ -125,11 +240,11 @@ func (s *ControlServer) run(
 
 func handleControl(
 	ctx context.Context,
-	socket *zmqx.Socket,
+	socket controlSocket,
 	frames [][]byte,
 	session string,
 	runtime *Runtime,
-	publisher *ZMQPublisher,
+	publisher readyWaiter,
 ) error {
 	if len(frames) < 3 || len(frames) > 4 {
 		// ROUTER prepends exactly one identity frame to the 2-3 protocol
@@ -137,20 +252,41 @@ func handleControl(
 		return nil
 	}
 	identity := append([]byte(nil), frames[0]...)
-	cid, err := shenguard.NewClientID(string(identity))
-	if err != nil {
-		return sendControlError(socket, identity, 0, session, fmt.Errorf("invalid ROUTER identity: %w", err))
+	// cid is empty until the identity frame parses; reply closes over it so that
+	// every answer to this peer is attributed to the right client.
+	var cid shenguard.ClientID
+	// All replies funnel through reply, so a peer that vanished between sending
+	// its request and receiving its answer surfaces as a clientFault -- one dead
+	// client -- rather than as a server failure that ends the session.
+	reply := func(msg protocol.Message) error {
+		err := sendControl(socket, identity, msg)
+		if err == nil || !peerGone(err) {
+			return err
+		}
+		return &clientFault{client: cid, err: err}
 	}
+	replyError := func(requestID uint64, cause error) error {
+		return reply(protocol.Message{
+			Kind: protocol.KindError,
+			Meta: protocol.Meta{Version: protocol.Version, Session: session, RequestID: requestID, Error: cause.Error()},
+		})
+	}
+
+	parsed, err := shenguard.NewClientID(string(identity))
+	if err != nil {
+		return replyError(0, fmt.Errorf("invalid ROUTER identity: %w", err))
+	}
+	cid = parsed
 	msg, err := protocol.Decode(frames[1:])
 	if err != nil {
-		return sendControlError(socket, identity, 0, session, err)
+		return replyError(0, err)
 	}
 	requestID := msg.Meta.RequestID
 	if msg.Meta.Session != "" && msg.Meta.Session != session {
-		return sendControlError(socket, identity, requestID, session, fmt.Errorf("unknown session %q", msg.Meta.Session))
+		return replyError(requestID, fmt.Errorf("unknown session %q", msg.Meta.Session))
 	}
 	if msg.Meta.ClientID != "" && msg.Meta.ClientID != cid.String() {
-		return sendControlError(socket, identity, requestID, session, errors.New("client_id does not match ROUTER identity"))
+		return replyError(requestID, errors.New("client_id does not match ROUTER identity"))
 	}
 
 	// Any valid control-plane traffic renews the owner's lease. Touch is a
@@ -213,12 +349,12 @@ func handleControl(
 		err = fmt.Errorf("message kind %q is not valid on the control plane", msg.Kind)
 	}
 	if err != nil {
-		return sendControlError(socket, identity, requestID, session, err)
+		return replyError(requestID, err)
 	}
 	if response == nil {
 		return nil
 	}
-	return sendControl(socket, identity, *response)
+	return reply(*response)
 }
 
 func controlAck(session string, cid shenguard.ClientID, requestID uint64, runtime *Runtime) *protocol.Message {
@@ -234,14 +370,7 @@ func controlAck(session string, cid shenguard.ClientID, requestID uint64, runtim
 	}
 }
 
-func sendControlError(socket *zmqx.Socket, identity []byte, requestID uint64, session string, err error) error {
-	return sendControl(socket, identity, protocol.Message{
-		Kind: protocol.KindError,
-		Meta: protocol.Meta{Version: protocol.Version, Session: session, RequestID: requestID, Error: err.Error()},
-	})
-}
-
-func sendControl(socket *zmqx.Socket, identity []byte, msg protocol.Message) error {
+func sendControl(socket controlSocket, identity []byte, msg protocol.Message) error {
 	frames, err := protocol.Encode(msg)
 	if err != nil {
 		return err

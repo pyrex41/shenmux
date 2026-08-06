@@ -63,6 +63,13 @@ const (
 var (
 	ErrWouldBlock = errors.New("zmq operation would block")
 	ErrClosed     = errors.New("zmq object is closed")
+
+	// ErrNoRoute and ErrNoIdentity are re-exported so callers can tell a
+	// per-peer delivery failure from a dead socket without importing zmq4
+	// past this adapter. mapError passes both through untouched, so
+	// errors.Is works on anything zmqx returns.
+	ErrNoRoute    = zmq.ErrNoRoute
+	ErrNoIdentity = zmq.ErrNoIdentity
 )
 
 type Context struct {
