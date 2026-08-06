@@ -54,6 +54,8 @@ spec:
             # websocket upgrader accepts any origin.
             - --origin=http://shenmux-controller.shenmux.svc.cluster.local:8788
             - --dev-browser-subject=local-test
+            # A pool, so each worker can take its own single-use code.
+            - --enrollment-count=20
             - --state-dir=/state
           ports:
             - { name: http, containerPort: 8788 }
@@ -107,6 +109,7 @@ spec:
         - name: session
           image: shenmux:local
           imagePullPolicy: Never
+          workingDir: /workspace
           command: ["/usr/local/bin/shenmux"]
           args:
             - run
@@ -115,6 +118,7 @@ spec:
             - --data=ipc:///ipc/work.pub
           volumeMounts:
             - { name: ipc, mountPath: /ipc }
+            - { name: workspace, mountPath: /workspace }
         - name: web
           image: shenmux:local
           imagePullPolicy: Never
@@ -128,10 +132,15 @@ spec:
             # Fixed so the URL is predictable; the gateway generates one
             # otherwise and it would change on every restart.
             - --token=local-trial
+            # Without this the files pane is a browser-local sandbox that has
+            # nothing to do with this pod, sitting next to a terminal that is
+            # this pod. Point it at the session's actual working directory.
+            - --workspace-dir=/workspace
           ports:
             - { name: web, containerPort: 8787 }
           volumeMounts:
             - { name: ipc, mountPath: /ipc }
+            - { name: workspace, mountPath: /workspace }
         - name: agent
           image: shenmux:local
           imagePullPolicy: Never
@@ -167,6 +176,9 @@ spec:
         - name: ipc
           emptyDir: {}
         - name: state
+          emptyDir: {}
+        # Shared so the terminal and the files pane are the same directory.
+        - name: workspace
           emptyDir: {}
 ---
 # The real browser terminal, served from inside the worker pod. Reach it with:

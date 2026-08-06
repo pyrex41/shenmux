@@ -35,6 +35,7 @@ import (
 	"github.com/pyrex41/shenmux/internal/shenguard"
 	transportpkg "github.com/pyrex41/shenmux/internal/transport"
 	"github.com/pyrex41/shenmux/internal/webgateway"
+	workspacebackend "github.com/pyrex41/shenmux/internal/workspace"
 )
 
 var (
@@ -482,6 +483,7 @@ func runWeb(ctx context.Context, args []string, _ io.Writer, stderr io.Writer) e
 	historyDir := flags.String("history-dir", "", "durable session history directory (optional)")
 	token := flags.String("token", os.Getenv("SHENMUX_WEB_TOKEN"), "access token required to attach (generated when empty)")
 	noToken := flags.Bool("no-token", false, "serve without an access token; anything that can reach --listen may attach")
+	workspaceDir := flags.String("workspace-dir", "", "directory the /workspace page reads and writes; empty leaves it a browser-local sandbox")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -516,10 +518,32 @@ func runWeb(ctx context.Context, args []string, _ io.Writer, stderr io.Writer) e
 			return err
 		}
 	}
-	gateway := webgateway.New(ctx, webgateway.Config{
+	webCfg := webgateway.Config{
 		Session: *session, ControlEndpoint: *control, DataEndpoint: *data, HistoryDir: *historyDir,
 		Token: accessToken,
-	})
+	}
+	if *workspaceDir != "" {
+		// Without this the /workspace page is a browser-local OPFS sandbox.
+		// Serving that beside a terminal into this machine invites the reading
+		// that the file pane shows this machine's files, which it does not.
+		root, err := filepath.Abs(*workspaceDir)
+		if err != nil {
+			return fmt.Errorf("resolve workspace directory: %w", err)
+		}
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			return fmt.Errorf("create workspace directory: %w", err)
+		}
+		webCfg.WorkspaceStore = workspacebackend.NewLocalStore(root)
+		// The gateway token is the capability: whoever may attach to this
+		// session may read its workspace, and nobody else. With no token
+		// configured the gateway is already open, so the workspace matches it.
+		token := accessToken
+		webCfg.WorkspaceAuthorize = func(capability, _, _ string) bool {
+			return token == "" || capability == token
+		}
+		fmt.Fprintf(stderr, "shenmux web workspace=%s\n", root)
+	}
+	gateway := webgateway.New(ctx, webCfg)
 	server := &http.Server{Addr: *listen, Handler: gateway.Handler()}
 	go func() {
 		<-ctx.Done()

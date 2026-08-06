@@ -45,11 +45,18 @@
         </section>
       </div>
 
+      <!-- Both spans are set by workspace.js once it knows whether a remote
+           store is configured. Hardcoding either one made the page claim to be
+           a browser-local sandbox while it was serving a real directory. -->
       <footer class="workspace-footer">
-        <span>local-first prototype</span>
-        <span>WASI component now · OPFS persists state · remote sync adapter next</span>
+        <span id="footer-mode">starting…</span>
+        <span id="footer-detail"></span>
       </footer>
     </main>
+    <!-- Stamped per request by internal/webgateway. Absent (or left as the
+         placeholder) means no remote store is configured and the workspace is
+         browser-local, which the page then says plainly. -->
+    <script>window.__SHENMUX_WORKSPACE_REMOTE__ = __SHENMUX_WORKSPACE_CONFIG__;</script>
     <script type="module" src="/workspace.js"></script>
   </body>
 </html>

@@ -251,6 +251,19 @@ if (typeof document !== "undefined") {
   const commandPrompt = document.querySelector("#command-prompt");
   const commandInputMeasure = document.querySelector("#command-input-measure");
   const commandCompletions = document.querySelector("#command-completions");
+  const footerMode = document.querySelector("#footer-mode");
+  const footerDetail = document.querySelector("#footer-detail");
+
+  // Say which files these are. A browser-local sandbox served from a machine
+  // you also have a terminal into looks exactly like that machine's files and
+  // is not, so the difference has to be stated rather than implied.
+  function setFooter(isRemote) {
+    if (!footerMode || !footerDetail) return;
+    footerMode.textContent = isRemote ? "remote workspace" : "browser-local sandbox";
+    footerDetail.textContent = isRemote
+      ? "files served by this gateway · edits write through · WASI component"
+      : "files exist only in this browser (OPFS) · nothing here is on the server";
+  }
   const storageStatus = document.querySelector("#storage-status");
   const saveStatus = document.querySelector("#save-status");
   const saveFileButton = document.querySelector("#save-file");
@@ -445,8 +458,10 @@ if (typeof document !== "undefined") {
         async sync() { const result = await host.flush(); this.syncState = host.syncState; return result; },
       };
       runtimeLabel = remote ? "WASI · remote cache" : "WASI · OPFS cache";
+      setFooter(Boolean(remote));
     } catch (error) {
       runtimeLabel = "OPFS fallback";
+      setFooter(false);
       print(`WASI component unavailable · ${error.message}`, "hint");
       throw error;
     }

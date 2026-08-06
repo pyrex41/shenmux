@@ -14,8 +14,15 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/muxctl ./cmd/muxct
 FROM debian:bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bash ca-certificates fish zsh \
+    && apt-get install -y --no-install-recommends bash ca-certificates curl fish git zsh \
     && rm -rf /var/lib/apt/lists/*
+
+# A session opened in a browser is the product surface, so the shell inside the
+# container should not be a bare root prompt. starship gives the same prompt
+# people get locally, and detects arch itself so this works on arm64 and amd64.
+RUN curl -fsSL https://starship.rs/install.sh | sh -s -- --yes \
+    && printf 'eval "$(starship init zsh)"\n' >> /root/.zshrc \
+    && printf 'eval "$(starship init bash)"\n' >> /root/.bashrc
 
 COPY --from=build /out/muxd /usr/local/bin/muxd
 COPY --from=build /out/shenmux /usr/local/bin/shenmux
