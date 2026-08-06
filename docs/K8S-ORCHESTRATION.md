@@ -270,8 +270,14 @@ idiomatic SBCL that has no clean path into a Go control plane.
   generics that calls the operator's API. `manager-fork`, `manager-diff`,
   the MCP snapshot tools, and the capability layer are reused unchanged by
   *not moving them*.
-- **The seam is MCP** — the orchestration server on our side, its stdio
-  MCP client on theirs.
+- **The seam is the API, not a protocol adapter**: declarative verbs are
+  `AgentWorker` CRs (reached via the `muxwork` CLI or any Kubernetes
+  client); the imperative backend calls that don't map onto CRs —
+  `backend-exec`, `backend-snapshot`, `backend-restore` — are a small
+  synchronous HTTP/JSON facade on the operator, which suits the
+  execution-backend generics' plain request/response shape and SBCL's
+  mature HTTP clients. Events flow back as the CR watch stream
+  (`muxwork watch --json`).
 
 ## The orchestrator layer
 
@@ -348,36 +354,54 @@ Three producers create and drive `AgentWorker`s:
    completion marks the worker `Completed`. This is the direct analogue of
    the Sprites worker, with `spawn()` replaced by creating a CR.
 3. **Orchestrator agents**: a worker whose sidecar is marked
-   `--orchestrator`, given access to an **orchestration MCP server** exposing
-   `spawn_worker`, `suspend_worker`, `resume_worker`, `fork_worker`,
-   `list_workers`, and `get_worker_output`. Any of the four harnesses can
-   play orchestrator, since all of them speak MCP. This is how "an agent
-   spins up durable/resumable/forkable sub-workers" is expressed: the
-   orchestrator plans, forks a base worker per approach, and harvests
-   results — while every sub-worker remains a first-class shenmux session a
-   human can open and steer.
+   `--orchestrator`, given the **orchestration CLI** in its image (working
+   name `muxwork`): `muxwork spawn|suspend|resume|fork|list|status|logs`,
+   plus `muxwork watch` for the event stream. Every harness can play
+   orchestrator because every harness can run a shell command — no
+   protocol adapter per harness. This is how "an agent spins up
+   durable/resumable/forkable sub-workers" is expressed: the orchestrator
+   plans, forks a base worker per approach, and harvests results — while
+   every sub-worker remains a first-class shenmux session a human can
+   open and steer.
 
    autopoiesis is the natural orchestrator brain here, beyond being the
-   source of the snapshot model, and the wiring already exists on its
-   side: its stdio MCP client (`connect-mcp-server-config` +
-   `register-mcp-tools-as-capabilities`) turns every tool of an external
-   MCP server into a first-class agent capability in one call, so the
-   orchestration verbs land directly in its cognitive loop. (Its JSON-RPC
-   client is strictly synchronous request/response — the orchestration
-   server must not emit server-initiated notifications.) It also already
-   drives claude/codex/opencode as headless pipe-based subprocess
-   providers and routes `:pi` tasks despite shipping no pi provider, and
-   it contains no PTY or multiplexer code at all — shenmux workers supply
-   exactly the durable interactive terminal surface it lacks. The
-   symmetry is the point — the orchestrator's *cognitive* state and each
-   worker's *filesystem* state are both content-addressed forkable DAGs,
-   so forking a plan branch can fork the workers it was driving, and
-   diffing two plan branches can pull in the corresponding
+   source of the snapshot model, and a CLI is native to its idioms: its
+   entire provider layer already drives claude/codex/opencode as
+   pipe-based subprocesses, so `muxwork` is just another
+   `run-provider-subprocess` target (and `muxwork watch --json` lines
+   pump straight into its substrate as datoms for its reactive
+   `defsystem` hooks). It routes `:pi` tasks despite shipping no pi
+   provider, and it contains no PTY or multiplexer code at all — shenmux
+   workers supply exactly the durable interactive terminal surface it
+   lacks. The symmetry is the point — the orchestrator's *cognitive*
+   state and each worker's *filesystem* state are both content-addressed
+   forkable DAGs, so forking a plan branch can fork the workers it was
+   driving, and diffing two plan branches can pull in the corresponding
    worker-timeline diffs.
 
-The MCP server is a thin authenticated shim over the Kubernetes API
-(create/patch `AgentWorker` CRs), so RBAC on the CR is the single
-authorization point for humans, the bridge, and orchestrator agents alike.
+### The verb surface: API first, CLI as the face
+
+There is no separate orchestration service. The **Kubernetes API is the
+API**: every verb is CRUD on `AgentWorker` CRs, and asynchronous events
+are the CR **watch stream** — an ordered, resumable
+(`resourceVersion`-cursored) message feed of status transitions
+(spawned, running, checkpointed, suspended, completed, failed) that
+already is a real message protocol, with delivery, resume, and authz
+semantics we don't have to invent.
+
+`muxwork` is a thin Go client over that API (shared client library with
+the operator), not a second control plane. Each worker pod gets a
+ServiceAccount whose RBAC defines what its agent may do — e.g. an
+orchestrator may create and fork workers in its namespace, a leaf worker
+may only read its own status. One authorization point — CR RBAC — covers
+humans with kubectl, the bridge, orchestrator agents, and autopoiesis's
+`k8s-overlay-backend` (which consumes a small HTTP facade on the operator
+for the exec/snapshot/restore calls that don't map onto CRs; see the
+reuse strategy).
+
+If fan-out beyond the cluster ever matters (many external observers,
+cross-cluster fleets), a broker like NATS can mirror the watch stream —
+an addition behind the same event schema, not a replacement.
 
 ## Security posture
 
@@ -448,7 +472,9 @@ New components (this repo or a sibling):
 5. Snapshot-agent DaemonSet (overlay mounts, upperdir flush on drain) and a
    content-addressed checkpoint store client for object storage.
 6. Claude-managed bridge (work-queue poller → CRs).
-7. Orchestration MCP server (verbs over the CR API).
+7. The `muxwork` CLI and the operator's HTTP facade for
+   execution-backend calls (both thin clients of the CR API and operator;
+   no separate orchestration service).
 
 Karpenter itself is off-the-shelf; the design only adds a `NodePool` and
 interruption-aware suspend handling in the operator.
@@ -468,9 +494,10 @@ interruption-aware suspend handling in the operator.
   handling on a Karpenter `NodePool`; CSI `VolumeSnapshot` clone remains
   the pvc-mode fallback. The claude-managed work-queue bridge with
   idempotent redelivery.
-- **Phase 3 — orchestrator agents.** Orchestration MCP server; fleet
-  grouping in the workspace using the advertised harness/workload/
-  orchestrator metadata.
+- **Phase 3 — orchestrator agents.** The `muxwork` CLI in worker images
+  with per-worker ServiceAccount RBAC; the operator's HTTP facade for
+  autopoiesis's `k8s-overlay-backend`; fleet grouping in the workspace
+  using the advertised harness/workload/orchestrator metadata.
 
 Sketch manifests for the CRD and example workers live in
 [`deploy/kubernetes/orchestrator/`](../deploy/kubernetes/orchestrator/).
