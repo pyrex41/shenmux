@@ -61,6 +61,70 @@ socket lifetime and cannot accumulate faster than clients disconnect.
 stall the loop; the next client must still be served and the blocked client's
 lease must come free.
 
+### What the ZeroMQ guidance says, and why our driver is off-pattern
+
+Checked against the canonical docs, because this is a well-known problem with a
+well-known answer and it is worth knowing how far we have drifted from it.
+
+Canonical libzmq ROUTER behaviour: on reaching a peer's high-water mark, a
+ROUTER **silently drops** messages for that peer. Setting `ZMQ_ROUTER_MANDATORY`
+converts dropping into "block or return `EAGAIN`" — `EAGAIN` when the send is
+non-blocking. The guide is explicit about our exact failure: *"Using a single
+ROUTER socket for output would be problematic, since any one blocked peer would
+block outgoing traffic to all peers."* The recommended handling is a
+non-blocking send plus `EAGAIN`, i.e. treat a peer that is not draining as a
+peer to drop.
+
+Three ways our stack diverges:
+
+1. **The pure-Go driver's default is the dangerous mode.** `tomi77/zmq4`
+   defaults to the `Block` overflow policy, so we get libzmq's
+   `ROUTER_MANDATORY`-with-blocking semantics *by default*, where libzmq would
+   have dropped. That is why this hangs rather than degrading.
+2. **The safe mode is unusable as shipped.** `WithSndHWMPolicy(Drop)` exists,
+   but a dropped message makes `p.send` return false, which `ROUTER.Send`
+   reports as `ErrClosed` (`router.go:53`) — indistinguishable from a genuinely
+   closed socket, and classified as fatal on our side. A full queue is not a
+   closed socket; reporting it as one turns a slow client into a dead session.
+3. **The canonical fix is not expressible.** A non-blocking send would be the
+   textbook answer, but `zmqx.SendMultipart` rejects the `DontWait` flag
+   (`flags&^SndMore`), and the driver's `ROUTER.Send` discards its context, so
+   the trick `zmqx` already uses for non-blocking *receives* — a zero-deadline
+   context — cannot work for sends.
+
+**Live trap worth fixing regardless:** `zmqx.SetInt(SndTimeout, …)` is accepted
+and silently does nothing. The `case Linger, RcvTimeout, SndTimeout, …` arm
+comments that "context cancellation and explicit close provide these
+semantics", which is true for receive (the driver's `Recv` honours its context)
+and **false for send**. Anyone attacking this hang the obvious way — set a send
+timeout — will get a clean `nil` and no behaviour change. Either implement it
+or reject the option; do not keep accepting it.
+
+### Preferred fix, revised
+
+**Upstream the context.** The driver already threads a `context.Context` into
+every `Send` and then ignores it. `p.send(msg, closeCh)` is called from six
+places (`router.go`, `dealer.go`, `pair.go`, `push.go`, `rep.go`, `req.go`),
+each passing `s.base.closeCh`; adding the context to that select is roughly ten
+lines. That makes `zmqx.SendMultipartContext` behave as its own doc comment
+already promises, and makes `DontWait`-on-send implementable symmetrically with
+receive. We have precedent for upstreaming a small fix to a dependency.
+
+Until that lands, bound it at our layer as described above. Prefer the bound
+even after an upstream fix if the upstream release is slow — the two are
+compatible, and the layer-level bound is what makes the behaviour ours to test.
+
+**Not doing:** the guide's structural suggestion of avoiding a single ROUTER for
+output (a socket per peer, or a proxy pair). It is the "correct" ZeroMQ answer
+and it is a large change to a control plane that otherwise works; recording it
+here as the road not taken, and as the reason per-client bounding is the
+pragmatic substitute.
+
+**Worth investigating separately:** ZMTP-level heartbeats
+(`ZMQ_HEARTBEAT_IVL`/`TTL`/`TIMEOUT`) would let the transport notice a dead peer
+rather than waiting for a send to wedge. I have not verified whether this driver
+implements them — check before planning around it.
+
 ---
 
 ## 2. Three outcomes, one of them silent
