@@ -352,6 +352,42 @@ control for an unbounded queue we cannot.
 **Decision: stay on `tomi77/zmq4`.** Revisit if `go-zeromq/zmq4` gains ROUTER
 HWM; mandatory routing would be welcome but is no longer the deciding factor.
 
+### Could we adopt `shen.x.zmq` itself? Not today, and the blocker is structural
+
+Checked properly rather than assumed, because "move the transport into Shen" is
+the more interesting version of this question.
+
+The waist cannot give a socket an identity. `shen.x.zmq.socket-host` has
+**arity 1** -- a type symbol, nothing else -- and `go-zeromq/zmq4` accepts an
+identity only at construction, through `WithID`. `setopt-host` passes unknown
+options through, but there is nothing underneath to receive one, and identity
+has to be set before the socket connects in any case.
+
+That is fatal here rather than inconvenient. The control plane addresses every
+reply by ROUTER identity: `client.go` sets a DEALER identity to the client id,
+and `handleControl` reads `frames[0]` to know who asked and who to answer. With
+no settable identity there is no addressing, so this is not a degradation to
+weigh -- the protocol does not function.
+
+Two smaller gaps point the same way: the waist's option set is
+`rcvtimeo, sndtimeo, subscribe, unsubscribe, linger`, so `MaxMsgSize` and both
+HWMs have nowhere to go either.
+
+**What would unblock it,** and it is a small, honest contribution rather than a
+rewrite: widen the waist to carry `identity` at socket construction and `hwm` as
+an option, then implement both in the shen-go host. `identity` is a `WithID`
+away; `hwm` needs ROUTER support that `go-zeromq/zmq4` does not have yet, which
+puts it behind the same upstream work as the rest of item 7.
+
+**Worth separating from the goal it serves.** The reason to want this is to put
+distributed-systems logic under Shen where its invariants apply. That goal is
+right, and it has already been served where it counts: ownership-with-an-age,
+delivery classification and idempotent peer loss are in `specs/mux.shen` and run
+at runtime. Socket primitives are not where the invariants live -- send and recv
+have no interesting semantics to constrain -- and routing PTY deltas through a
+Shen call per message puts the cost on the hottest path in the system. The
+semantics moved; the syscalls need not follow.
+
 **A constructive note for `shen-extensions`:** its waist could carry
 `router-mandatory` as an int socket option, with libzmq-backed ports
 implementing it natively and the pure-Go shen-go backend taking the existing
