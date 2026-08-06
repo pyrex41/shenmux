@@ -137,9 +137,13 @@ the PVC, fork clones it via CSI `VolumeSnapshot` + `dataSourceRef`. No extra
 infrastructure, but forks are whole-volume operations, RWO volumes pin
 resume to one zone, and storage cost scales with full copies.
 
-**`overlay` — checkpoint mode, the intended default.** Layered state in the
-style of the autopsies snapshot model: a worker's `/state` is an overlayfs
-mount over a shared immutable base.
+**`overlay` — checkpoint mode, the intended default.** Layered state
+following the snapshot model of
+[autopoiesis](https://github.com/pyrex41/autopoiesis), which represents
+agent state as a content-addressable snapshot DAG with O(1) forking and
+diffable divergent timelines. Here the same model is applied to worker
+*filesystem* state: a worker's `/state` is an overlayfs mount over a shared
+immutable base.
 
 ```text
 lowerdir   shared read-only base: repo clone, toolchain, harness install
@@ -152,8 +156,25 @@ object storage plus a small manifest — parent checkpoint, git commit,
 harness session ref — the same manifest shape already sketched in
 [SESSION-HISTORY.md](SESSION-HISTORY.md). Because the base never changes, a
 checkpoint captures only the delta: cheap to take, cheap to store,
-deduplicated across the fleet. The lifecycle verbs become checkpoint
-operations:
+deduplicated across the fleet.
+
+Checkpoints form a **DAG**, not a per-worker chain: each manifest points at
+its parent, forks create branches, and a worker is just a mutable pointer
+to a branch head — the same relationship an autopoiesis context has to its
+turn DAG. That framing buys three things:
+
+- fork from *any* historical checkpoint, not only a worker's latest state
+  (`workspace.from.checkpointRef`);
+- branch-level identity: at the metadata layer a fork is O(pointer); the
+  O(delta) cost is only paid when the new worker's node materializes the
+  upperdir;
+- **diffable timelines**: two divergent branches can be compared — the
+  upperdirs give the workspace diff, the harness session files give the
+  conversation diff, and the shenmux history archives give the terminal
+  diff. An orchestrator that forked N approaches can answer "how did these
+  runs actually differ?" from the DAG alone.
+
+The lifecycle verbs become checkpoint operations:
 
 - **suspend** = final checkpoint upload, then the pod *and its node-local
   state* are discarded entirely; the worker's durable identity is its
@@ -268,6 +289,15 @@ Three producers create and drive `AgentWorker`s:
    orchestrator plans, forks a base worker per approach, and harvests
    results — while every sub-worker remains a first-class shenmux session a
    human can open and steer.
+
+   autopoiesis is the natural orchestrator brain here, beyond being the
+   source of the snapshot model: point its tool layer at the orchestration
+   MCP server and its agents can spawn/fork/suspend workers as actions in
+   their cognitive loop. The symmetry is the point — the orchestrator's
+   *cognitive* state and each worker's *filesystem* state are both
+   content-addressed forkable DAGs, so forking a plan branch can fork the
+   workers it was driving, and diffing two plan branches can pull in the
+   corresponding worker-timeline diffs.
 
 The MCP server is a thin authenticated shim over the Kubernetes API
 (create/patch `AgentWorker` CRs), so RBAC on the CR is the single

@@ -85,9 +85,9 @@ spec:
                       type: object
                       description: >-
                         Fork source; exactly one field may be set. workerRef
-                        uses the source worker's latest checkpoint (overlay)
-                        or a fresh volume snapshot (pvc). checkpointRef
-                        names a specific checkpoint manifest.
+                        uses the source worker's branch head (overlay) or a
+                        fresh volume snapshot (pvc). checkpointRef names any
+                        node in the content-addressed checkpoint DAG.
                       properties:
                         workerRef:
                           type: string
@@ -127,8 +127,9 @@ spec:
                 lastCheckpoint:
                   type: string
                   description: >-
-                    Overlay mode: most recent checkpoint manifest ID; what a
-                    resume or interruption recovery restores from.
+                    Overlay mode: the worker's branch head in the checkpoint
+                    DAG; what a resume or interruption recovery restores
+                    from.
                 conditions:
                   type: array
                   items:
