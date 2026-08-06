@@ -81,7 +81,13 @@ func cmdLogs(state string, args []string, out io.Writer) error {
 		return fmt.Errorf("logs: --name is required")
 	}
 	w := operator.NewWorker(state, *name)
-	tail, err := tailFile(w.SessionLog(), *lines)
+	// Prefer the harness transcript (the PTY content shenmux owns, mirrored to
+	// a file); fall back to the session log (shenmux's own launch banner).
+	src := w.TranscriptLog()
+	if _, err := os.Stat(src); err != nil {
+		src = w.SessionLog()
+	}
+	tail, err := tailFile(src, *lines)
 	if err != nil {
 		return err
 	}

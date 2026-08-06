@@ -79,6 +79,10 @@ func childEnv(w Worker, cfg SpawnConfig, proxyPort int) []string {
 		"SSL_CERT_FILE=" + ca,
 		"MOCK_TARGET=" + target,
 		"MOCK_STEPS=" + steps,
+		// Harness stdout is owned by shenmux (the live PTY session); mirror the
+		// transcript to a plain file the operator/muxwork can read headlessly.
+		"MOCK_TRANSCRIPT=" + w.TranscriptLog(),
+		"WORKER=" + w.Name,
 	}
 	if cfg.Prompt != "" {
 		env = append(env, "PROMPT="+cfg.Prompt)

@@ -46,6 +46,11 @@ func (w Worker) ManifestsDir() string { return filepath.Join(w.Dir(), "manifests
 // HistoryDir is the shenmux session history directory.
 func (w Worker) HistoryDir() string { return filepath.Join(w.Dir(), "shenmux-history") }
 
+// TranscriptLog is the harness's plain-text transcript, mirrored from the PTY
+// stdout that shenmux owns, so headless tooling can read it without decoding
+// the shenmux history archive.
+func (w Worker) TranscriptLog() string { return filepath.Join(w.Workspace(), "agent.log") }
+
 // SessionLog is the combined worker session output.
 func (w Worker) SessionLog() string { return filepath.Join(w.Dir(), "session.log") }
 
