@@ -1,0 +1,149 @@
+
+== 0. BUILD ==
+   building orchestrator cmds into bin/ ...
+   built: mock-agent mock-upstream muxwork secret-proxy shenmux snapshot 
+   bin/shenmux present
+   PASS bin/mock-upstream built
+   PASS bin/secret-proxy built
+   PASS bin/snapshot built
+   PASS bin/muxwork built
+   PASS bin/mock-agent built
+
+== 1. MOCK UPSTREAM ==
+   trying: /home/user/shenmux/orchestrator/bin/mock-upstream --http 0.0.0.0:8091
+   mock-upstream up (pid 21924)
+   PASS mock-upstream listening on 127.0.0.1:8091
+   127.0.0.2 alias reachable — strong blocked-host check enabled
+
+== 2. SECRET INTERCEPTION (standalone) ==
+   secrets.json: allowed_hosts=[127.0.0.1], NOT blocked.example / 127.0.0.2
+   starting secret-proxy on http://127.0.0.1:8888 ...
+   PASS secret-proxy listening on 127.0.0.1:8888
+   --- ALLOWED host (127.0.0.1) ---
+       === mock-agent step 1/1 worker=probe target=http://127.0.0.1:8091/ ===
+       agent-holds: sk-placeholder-anthropic
+       upstream-received: sk-REAL-anthropic-value
+       DONE probe
+   PASS allowed host: agent held only the placeholder
+   PASS allowed host: upstream received the REAL value (swap happened)
+   --- BLOCKED host (127.0.0.2 / not allow-listed) ---
+       === mock-agent step 1/1 worker=probe target=http://127.0.0.2:8091/ ===
+       agent-holds: sk-placeholder-anthropic
+       upstream-received: sk-placeholder-anthropic
+       DONE probe
+   PASS blocked host: real value did NOT leak
+   PASS blocked host: upstream saw only the placeholder
+   proxy log (interception decisions):
+       secret-proxy: 2026/08/06 03:47:59 replaced ANTHROPIC_API_KEY for 127.0.0.1
+       secret-proxy: 2026/08/06 03:47:59 blocked ANTHROPIC_API_KEY host 127.0.0.2 not allowed
+
+== 3. BASE WORKER (shenmux PTY + proxy + mock harness) ==
+   spawning worker 'base' (harness=mock, 3 steps) pointed at the upstream ...
+spawned worker "base": phase=Running backend=shenmux pid=21986 proxy_port=33569
+   waiting for base to run its steps ...
+   PASS base worker completed its run
+   base session log (tail):
+       === mock-agent step 1/3 worker=base target=http://127.0.0.1:8091/ ===
+       agent-holds: sk-placeholder-anthropic
+       upstream-received: sk-REAL-demo-base-key
+       === mock-agent step 2/3 worker=base target=http://127.0.0.1:8091/ ===
+       agent-holds: sk-placeholder-anthropic
+       upstream-received: sk-REAL-demo-base-key
+       === mock-agent step 3/3 worker=base target=http://127.0.0.1:8091/ ===
+       agent-holds: sk-placeholder-anthropic
+       upstream-received: sk-REAL-demo-base-key
+       DONE base
+   PASS worker: agent held the placeholder
+   PASS worker: upstream received a swapped (non-placeholder) value
+
+== 4. CHECKPOINT + FORK x3 ==
+   suspending base (final checkpoint) ...
+suspended worker "base": checkpoint=/tmp/shenmux-demo.g0MBjL/state/workers/base/manifests/20260806T034800Z.sexpr
+   PASS base has at least one checkpoint manifest
+   forking base -> alpha (2 steps) ...
+forked "alpha" from "base": phase=Running backend=shenmux pid=22432
+   forking base -> beta (3 steps) ...
+forked "beta" from "base": phase=Running backend=shenmux pid=22470
+   forking base -> gamma (4 steps) ...
+forked "gamma" from "base": phase=Running backend=shenmux pid=22511
+   waiting for alpha to run ...
+   PASS alpha completed
+   waiting for beta to run ...
+   PASS beta completed
+   waiting for gamma to run ...
+   PASS gamma completed
+
+== 5. DIVERGENCE ==
+   --- alpha workspace ---
+   progress.txt: 2
+   notes.md:
+       step 1 by base at 1785988079
+       step 2 by base at 1785988080
+       step 3 by base at 1785988080
+       step 1 by alpha at 1785988084
+       step 2 by alpha at 1785988084
+   --- beta workspace ---
+   progress.txt: 3
+   notes.md:
+       step 1 by base at 1785988079
+       step 2 by base at 1785988080
+       step 3 by base at 1785988080
+       step 1 by beta at 1785988084
+       step 2 by beta at 1785988084
+       step 3 by beta at 1785988085
+   --- gamma workspace ---
+   progress.txt: 4
+   notes.md:
+       step 1 by base at 1785988079
+       step 2 by base at 1785988080
+       step 3 by base at 1785988080
+       step 1 by gamma at 1785988085
+       step 2 by gamma at 1785988085
+       step 3 by gamma at 1785988085
+       step 4 by gamma at 1785988086
+   PASS the three forks' notes.md are not identical (workspaces diverged)
+   checkpointing alpha (so its post-run tree can be diffed vs base) ...
+   snapshot diff  base <-> alpha (content-addressed tree comparison):
+       ~ agent.log
+       ~ notes.md
+       ~ progress.txt
+   PASS snapshot diff shows the fork's tree changed vs base
+
+== 6. FLEET VIEW + EVENT STREAM ==
+   muxwork list:
+       NAME   HARNESS  PHASE      BACKEND  PID    PROXY_PORT  PARENT
+       alpha  mock     Suspended  shenmux  0      34827       base
+       base   mock     Suspended  shenmux  0      33569       -
+       beta   mock     Completed  shenmux  22470  41589       base
+       gamma  mock     Completed  shenmux  22511  42195       base
+   event stream (muxwork watch --json, first lines):
+       {"ts":1785988080,"worker":"base","event":"spawned","detail":{"harness":"mock","parent":"","proxy_port":33569,"session_backend":"shenmux"}}
+       {"ts":1785988080,"worker":"base","event":"running","detail":{"pid":21986}}
+       {"ts":1785988080,"worker":"base","event":"checkpointed","detail":"/tmp/shenmux-demo.g0MBjL/state/workers/base/manifests/20260806T034800Z.sexpr"}
+       {"ts":1785988084,"worker":"alpha","event":"spawned","detail":{"harness":"mock","parent":"base","proxy_port":34827,"session_backend":"shenmux"}}
+       {"ts":1785988084,"worker":"alpha","event":"running","detail":{"pid":22432}}
+       {"ts":1785988084,"worker":"alpha","event":"forked","detail":{"from":"base","src_manifest":"/tmp/shenmux-demo.g0MBjL/state/workers/base/manifests/20260806T034800Z.sexpr"}}
+       {"ts":1785988084,"worker":"base","event":"suspended","detail":"/tmp/shenmux-demo.g0MBjL/state/workers/base/manifests/20260806T034800Z.sexpr"}
+       {"ts":1785988085,"worker":"beta","event":"spawned","detail":{"harness":"mock","parent":"base","proxy_port":41589,"session_backend":"shenmux"}}
+       {"ts":1785988085,"worker":"beta","event":"running","detail":{"pid":22470}}
+       {"ts":1785988085,"worker":"beta","event":"forked","detail":{"from":"base","src_manifest":"/tmp/shenmux-demo.g0MBjL/state/workers/base/manifests/74cfea98-2d9b-4bb6-ab7a-dd08c12542cf.sexpr"}}
+       {"ts":1785988085,"worker":"gamma","event":"spawned","detail":{"harness":"mock","parent":"base","proxy_port":42195,"session_backend":"shenmux"}}
+       {"ts":1785988085,"worker":"gamma","event":"running","detail":{"pid":22511}}
+       {"ts":1785988085,"worker":"gamma","event":"forked","detail":{"from":"base","src_manifest":"/tmp/shenmux-demo.g0MBjL/state/workers/base/manifests/ca5ed438-af1d-429b-9e21-e0668d1760e7.sexpr"}}
+       {"ts":1785988086,"worker":"alpha","event":"checkpointed","detail":"/tmp/shenmux-demo.g0MBjL/state/workers/alpha/manifests/20260806T034806Z.sexpr"}
+       {"ts":1785988088,"worker":"alpha","event":"suspended","detail":"/tmp/shenmux-demo.g0MBjL/state/workers/alpha/manifests/20260806T034806Z.sexpr"}
+       {"ts":1785988088,"worker":"beta","event":"completed","detail":{"pid":22470}}
+       {"ts":1785988088,"worker":"gamma","event":"completed","detail":{"pid":22511}}
+   fork lineage (from events.ndjson):
+      alpha <- base  (forked)
+      beta <- base  (forked)
+      gamma <- base  (forked)
+
+== RESULT ==
+
+========== DEMO OK ==========
+
+== CLEANUP ==
+demo/demo.sh: line 94: 21939 Killed                  "$BIN/secret-proxy" --listen "127.0.0.1:${PROXY_PORT}" --secrets "$SECRETS" --ca-dir "$CA_DIR" --log "$PROXY_LOG" >> "$PROXY_LOG" 2>&1
+   removed /tmp/shenmux-demo.g0MBjL
+DEMO_EXIT=0

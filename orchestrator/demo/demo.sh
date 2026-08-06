@@ -325,19 +325,24 @@ notes_diverged() {
 }
 assert "the three forks' notes.md are not identical (workspaces diverged)" notes_diverged
 
-# snapshot diff between base's checkpoint and a fork's latest manifest.
+# Checkpoint alpha so it has its own manifest to diff against base's. (Its
+# run wrote extra steps into notes.md/progress.txt on top of base's tree.)
+say "checkpointing alpha (so its post-run tree can be diffed vs base) ..."
+muxwork suspend --name alpha >/dev/null 2>&1 || true
+
+# snapshot diff between base's checkpoint and alpha's latest manifest — the
+# concrete "diffable timelines" artifact: the tree entries that changed.
 latest_manifest() {
   ls -t "$STATE/workers/$1/manifests"/* 2>/dev/null | head -n1
 }
 BASE_MAN="$(latest_manifest base || true)"
 FORK_MAN="$(latest_manifest alpha || true)"
 if [[ -n "$BASE_MAN" && -n "$FORK_MAN" ]]; then
-  say "snapshot diff  base <-> alpha:"
-  if "$BIN/snapshot" diff --a "$BASE_MAN" --b "$FORK_MAN" 2>&1 | sed 's/^/       /'; then
-    ok "snapshot diff produced a tree comparison"
-  else
-    say "snapshot diff returned non-zero (non-fatal)"
-  fi
+  say "snapshot diff  base <-> alpha (content-addressed tree comparison):"
+  DIFF_OUT="$("$BIN/snapshot" diff --a "$BASE_MAN" --b "$FORK_MAN" 2>&1 || true)"
+  echo "$DIFF_OUT" | sed 's/^/       /'
+  assert "snapshot diff shows the fork's tree changed vs base" \
+    bash -c '[[ -n "'"$DIFF_OUT"'" ]] && grep -Eqi "modif|add|progress|notes|agent.log" <<<"'"$DIFF_OUT"'"'
 else
   say "skipping snapshot diff — a checkpoint manifest was not available"
 fi
