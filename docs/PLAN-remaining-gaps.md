@@ -237,3 +237,33 @@ another path first so there is something for it to be wrong about.
 
 Items 3 and 5 are each under an hour. Item 1 is the one worth care: it needs a
 test that genuinely hangs the stub, or it proves nothing.
+
+---
+
+## 6. The controller never tells the agent a browser is gone
+
+**Severity: high — this is the root cause of item 1 in the previous plan**, which
+was fixed at the symptom.
+
+`Controller.handleBrowser` (`internal/relay/tunnel.go:428`) forwards a
+`FrameClose` to the agent only when the browser *sends* one. Its read loop
+returns on any read error with nothing but `defer conn.Close()`, and there is no
+other notification path. A browser tab that closes abruptly — which is what
+closing a tab normally does — leaves the agent holding a stream for a peer that
+no longer exists.
+
+That is why the lease leak happened at all. `internal/agent/bridge.go` now
+releases the lease when a stream is torn down (`fea6cc0`), and the reducer now
+ages ownership so a stale lease expires rather than wedging the session — but
+both are downstream of a teardown that frequently never starts. The stream, its
+muxd client and its attachment survive until the tunnel itself dies.
+
+**Fix:** the controller must synthesise a close toward the agent when a browser
+stream ends for any reason, not only on a clean `FrameClose`. The agent side
+already does the right thing once it hears.
+
+**Test:** kill a browser websocket without a close frame; the agent's stream must
+be torn down and the client must leave the session's client list.
+
+Found while extending the spec: no reducer rule can reach this, because the
+session model never learns the stream existed. See `docs/WHAT-THE-SPEC-OWNS.md`.

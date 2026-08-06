@@ -48,9 +48,10 @@ func TestMuxSemanticMutationChangesExecutableBehavior(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Session fields: clients, seq, snapshot, dimensions, lock, exited, and
-	// nested control state: controller and pending attach are independent lists.
-	session := List{List{"client-a"}, uint64(0), "opaque-snapshot", List{uint64(80), uint64(24)}, false, false, List{List{"client-a"}, List{}}}
+	// Session fields: clients, seq, snapshot, dimensions, lock, exited, nested
+	// control state (controller and pending attach are independent lists), and
+	// the instant at which the owner last exercised control.
+	session := List{List{"client-a"}, uint64(0), "opaque-snapshot", List{uint64(80), uint64(24)}, false, false, List{List{"client-a"}, List{}}, uint64(0)}
 	got, err := original.Call("mux.accept-input?", session, "client-a")
 	if err != nil {
 		t.Fatal(err)
@@ -61,7 +62,7 @@ func TestMuxSemanticMutationChangesExecutableBehavior(t *testing.T) {
 
 	needle := `(define mux.accept-input?
   {session --> client-id --> boolean}
-  [Clients _ _ _ Locked Exited Control] C ->
+  [Clients _ _ _ Locked Exited Control _] C ->
     (and (not Locked)
          (and (not Exited)
               (and (mux.member? C Clients)

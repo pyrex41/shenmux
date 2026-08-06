@@ -18,11 +18,12 @@ import (
 	"github.com/pyrex41/shenmux/internal/shenmodel"
 )
 
-var requiredDatatypes = []string{"client-id", "seq-no", "dimensions", "snapshot", "session"}
+var requiredDatatypes = []string{"client-id", "seq-no", "dimensions", "snapshot", "session", "instant", "clock"}
 
 var requiredFunctions = map[string]int{
 	"mux.valid-client-id?":     1,
 	"mux.valid-dimensions?":    2,
+	"mux.valid-clock?":         2,
 	"mux.valid-snapshot-meta?": 5,
 	"mux.member?":              2,
 	"mux.remove-client":        2,
@@ -31,13 +32,15 @@ var requiredFunctions = map[string]int{
 	"mux.has-control?":         2,
 	"mux.accept-input?":        2,
 	"mux.accept-resize?":       2,
-	"mux.acquire-control-ok?":  2,
+	"mux.acquire-control-ok?":  3,
 	"mux.release-control-ok?":  2,
+	"mux.owner-fresh?":         2,
+	"mux.session-heard":        1,
 	"mux.begin-snapshot":       1,
 	"mux.end-snapshot":         2,
 	"mux.attach":               2,
 	"mux.detach":               2,
-	"mux.acquire-control":      2,
+	"mux.acquire-control":      3,
 	"mux.release-control":      2,
 	"mux.next-seq":             1,
 	"mux.event-ok?":            2,
@@ -45,7 +48,8 @@ var requiredFunctions = map[string]int{
 	"mux.apply-resize":         3,
 	"mux.apply-control":        2,
 	"mux.apply-exit":           2,
-	"mux.reduce":               2,
+	"mux.delivery-fatal?":      1,
+	"mux.reduce":               3,
 }
 
 func main() {

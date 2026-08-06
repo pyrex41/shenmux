@@ -31,6 +31,23 @@ const (
 	CommandProcessExit    CommandKind = "process-exit"
 	CommandLeaseExpired   CommandKind = "lease-expired"
 	CommandResync         CommandKind = "resync"
+	// CommandPeerLost is teardown after a per-peer delivery failure. It is
+	// idempotent in the model, so callers need not know whether the client ever
+	// completed an attach.
+	CommandPeerLost CommandKind = "peer-lost"
+)
+
+// Delivery outcomes are the vocabulary the host uses to describe a send that
+// was addressed to one named client. Which of them ends the session is decided
+// by the Shen model (DeliveryFatal), not here; an outcome absent from this list
+// is still a legal argument and is classified per-peer.
+const (
+	DeliveryNoRoute      = "no-route"
+	DeliveryNoIdentity   = "no-identity"
+	DeliveryNotDraining  = "not-draining"
+	DeliveryEncodeFault  = "encode-failed"
+	DeliverySocketClosed = "socket-closed"
+	DeliveryUnknown      = "unknown"
 )
 
 // TokenID identifies bytes held by a Go-side opaque payload store. Shen sees
@@ -95,9 +112,11 @@ type Result struct {
 
 func (r Result) IsRejected() bool { return !r.Accepted }
 
-// Reduce submits one command to the executable Shen model.
-func Reduce(state State, command Command) (Result, error) {
-	value, err := callSemantic("mux.reduce", sessionValue(state), commandValue(command))
+// Reduce submits one command to the executable Shen model. The clock is an
+// argument because the model decides what the host's reading makes true; it
+// never reads a clock itself.
+func Reduce(state State, clock Clock, command Command) (Result, error) {
+	value, err := callSemantic("mux.reduce", sessionValue(state), clockValue(clock), commandValue(command))
 	if err != nil {
 		return Result{}, err
 	}
@@ -108,7 +127,7 @@ func commandValue(c Command) shenmodel.List {
 	base := shenmodel.List{string(c.Kind)}
 	switch c.Kind {
 	case CommandAttach, CommandDetach, CommandAcquireControl, CommandReleaseControl,
-		CommandLeaseExpired, CommandResync, CommandBeginAttach:
+		CommandLeaseExpired, CommandResync, CommandBeginAttach, CommandPeerLost:
 		return append(base, c.Client.String())
 	case CommandInput, CommandPTYOutput:
 		if c.Kind == CommandInput {

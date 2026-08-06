@@ -63,9 +63,13 @@ type Runtime struct {
 
 	lastSeen     map[shenguard.ClientID]time.Time
 	controlLease time.Duration
-	historyDir   string
-	exitCode     int
-	closed       bool
+	// started anchors the millisecond readings handed to the Shen model. The
+	// model compares two numbers and never reads a clock, so the host owes it a
+	// monotonic, nonnegative origin.
+	started    time.Time
+	historyDir string
+	exitCode   int
+	closed     bool
 
 	// echoEnabled mirrors the PTY's termios ECHO bit. It is stamped onto every
 	// frame the runtime publishes, because the emulator sees only the escape
@@ -126,7 +130,7 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 		session: cfg.Session, model: model, pty: cfg.PTY, writer: writer,
 		term: cfg.Terminal, state: state, store: store, events: events,
 		lastSeen: make(map[shenguard.ClientID]time.Time), controlLease: cfg.ControlLease, historyDir: cfg.HistoryDir,
-		fatal: make(chan error, 1),
+		started: time.Now(), fatal: make(chan error, 1),
 	}
 	if err := runtime.persistHistory(); err != nil {
 		_ = runtime.Close()
@@ -187,8 +191,28 @@ func reduceError(reason shenguard.Reason) error {
 	}
 }
 
+// clockLocked converts host time into the two numbers the Shen model compares.
+// Both are floored: a negative reading and a sub-millisecond lease are host
+// mistakes, and neither may be allowed to express "every owner is instantly
+// stale" -- which the clock datatype refuses to represent anyway.
+func (r *Runtime) clockLocked(now time.Time) (shenguard.Clock, error) {
+	elapsed := now.Sub(r.started)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	lease := uint64(r.controlLease / time.Millisecond)
+	if lease == 0 {
+		lease = 1
+	}
+	return shenguard.NewClock(uint64(elapsed/time.Millisecond), lease)
+}
+
 func (r *Runtime) reduceLocked(command shenguard.Command) (shenguard.Result, error) {
-	result, err := shenguard.Reduce(r.model, command)
+	clock, err := r.clockLocked(time.Now())
+	if err != nil {
+		return shenguard.Result{}, err
+	}
+	result, err := shenguard.Reduce(r.model, clock, command)
 	if err != nil {
 		return shenguard.Result{}, err
 	}
@@ -264,7 +288,12 @@ func (r *Runtime) snapshot(cid shenguard.ClientID, requireAttached bool) (protoc
 		locked.LastSeq(), locked.Dim(), int(cursor.X), int(cursor.Y), stateAtBoundary.Frame.AltScreen, nil,
 	)
 	if err == nil {
-		finish, finishErr := shenguard.Reduce(locked, shenguard.Command{Kind: shenguard.CommandFinishAttach, Client: cid, Snapshot: snapshot})
+		clock, clockErr := r.clockLocked(time.Now())
+		finish := shenguard.Result{}
+		finishErr := clockErr
+		if finishErr == nil {
+			finish, finishErr = shenguard.Reduce(locked, clock, shenguard.Command{Kind: shenguard.CommandFinishAttach, Client: cid, Snapshot: snapshot})
+		}
 		if finishErr == nil && !finish.Accepted {
 			finishErr = reduceError(finish.Reason)
 		}
@@ -599,6 +628,34 @@ func (r *Runtime) Detach(cid shenguard.ClientID) error {
 	delete(r.lastSeen, cid)
 	newOwner := ownerString(result.State)
 	if oldOwner == newOwner {
+		r.model = result.State
+		return nil
+	}
+	msg, err := r.controlMessageFromResultLocked(result)
+	if err != nil {
+		return err
+	}
+	r.model = result.State
+	return r.enqueueCommittedLocked(msg)
+}
+
+// PeerLost tears a client down after a per-peer delivery failure. Unlike
+// Detach it never reports "not attached": the model makes the teardown
+// idempotent, so a caller on a failure path does not have to know how far the
+// client had got, and cannot get that judgement wrong one call site at a time.
+func (r *Runtime) PeerLost(cid shenguard.ClientID) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return errors.New("runtime is closed")
+	}
+	oldOwner := ownerString(r.model)
+	result, err := r.reduceLocked(shenguard.Command{Kind: shenguard.CommandPeerLost, Client: cid})
+	if err != nil {
+		return err
+	}
+	delete(r.lastSeen, cid)
+	if oldOwner == ownerString(result.State) {
 		r.model = result.State
 		return nil
 	}

@@ -53,7 +53,7 @@ func TestSessionTransitions(t *testing.T) {
 	if AcceptInput(s, cid) {
 		t.Fatal("attached observer should not be accepted before control acquisition")
 	}
-	s, err = AcquireControl(s, cid)
+	s, err = AcquireControl(s, testClock(t), cid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,11 +122,11 @@ func TestExclusiveControlOwnership(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	s, err = AcquireControl(s, first)
+	s, err = AcquireControl(s, testClock(t), first)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := AcquireControl(s, second); err != ErrControlOwned {
+	if _, err := AcquireControl(s, testClock(t), second); err != ErrControlOwned {
 		t.Fatalf("second acquisition error = %v", err)
 	}
 	if AcceptInput(s, second) || !AcceptInput(s, first) {
@@ -139,7 +139,7 @@ func TestExclusiveControlOwnership(t *testing.T) {
 	if _, ok := s.ControlOwner(); ok {
 		t.Fatal("detaching controller did not release ownership")
 	}
-	if s, err = AcquireControl(s, second); err != nil {
+	if s, err = AcquireControl(s, testClock(t), second); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -154,7 +154,7 @@ func TestLegacySnapshotPreservesControlOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err = AcquireControl(s, owner)
+	s, err = AcquireControl(s, testClock(t), owner)
 	if err != nil {
 		t.Fatal(err)
 	}

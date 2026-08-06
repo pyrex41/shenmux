@@ -115,29 +115,51 @@ func (e *encodeFault) Unwrap() error { return e.err }
 // errPeerNotDraining marks a reply the addressed peer never took delivery of.
 // It is the same condition as a missing route -- a client that is not receiving
 // -- reached from the other side: the peer still has a pipe, it has simply
-// stopped emptying it. peerGone treats the two alike so there is one concept
-// here ("the client is gone, clean up after it") rather than two.
+// stopped emptying it. The classification treats the two alike so there is one
+// concept here ("the client is gone, clean up after it") rather than two.
 var errPeerNotDraining = errors.New("control client is not taking delivery")
 
-// peerGone reports whether a control-plane send failed because the addressed
-// peer is no longer taking delivery, as opposed to because the socket is
-// unusable.
+// deliveryOutcome names, in the Shen model's vocabulary, why a reply addressed
+// to one identified client did not arrive. It only recognises; it does not
+// decide. Whether an outcome ends the session is mux.delivery-fatal?'s
+// judgement, and an outcome this function fails to recognise becomes
+// DeliveryUnknown rather than falling through to fatal -- which is how a
+// missing arm here cost a whole session twice.
 //
 // For the routing failures this is a sentinel comparison, not a message match:
 // zmq4 declares ErrNoRoute and ErrNoIdentity as package-level errors, and
 // ROUTER.Send wraps ErrNoRoute with %w when no pipe carries the requested
 // identity. That wrapped value is exactly the "zmq4: no route to peer: identity
-// web-..." failure that used to take a whole session down. Every other
-// ROUTER.Send failure is zmq4.ErrClosed, because the pure-Go ROUTER queues with
-// a blocking overflow policy and only refuses a message once the socket itself
-// is closing; zmqx maps that to zmqx.ErrClosed, which stays fatal here.
+// web-..." failure that used to take a whole session down. zmq4.ErrClosed is
+// the one outcome that is about the socket rather than the peer; zmqx maps it
+// to zmqx.ErrClosed.
 //
 // errPeerNotDraining is our own: a peer whose queue is full never produces a
 // zmq4 error at all, it just parks the sender forever (see boundedSender).
-func peerGone(err error) bool {
-	return errors.Is(err, zmqx.ErrNoRoute) ||
-		errors.Is(err, zmqx.ErrNoIdentity) ||
-		errors.Is(err, errPeerNotDraining)
+func deliveryOutcome(err error) string {
+	var encode *encodeFault
+	switch {
+	case errors.Is(err, zmqx.ErrNoRoute):
+		return shenguard.DeliveryNoRoute
+	case errors.Is(err, zmqx.ErrNoIdentity):
+		return shenguard.DeliveryNoIdentity
+	case errors.Is(err, errPeerNotDraining):
+		return shenguard.DeliveryNotDraining
+	case errors.As(err, &encode):
+		return shenguard.DeliveryEncodeFault
+	case errors.Is(err, zmqx.ErrClosed):
+		return shenguard.DeliverySocketClosed
+	default:
+		return shenguard.DeliveryUnknown
+	}
+}
+
+// perPeerFault reports whether a failed reply is one client's problem rather
+// than the session's. The rule lives in specs/mux.shen so that a new transport
+// outcome cannot silently change the answer, and so that the safe reading of an
+// unrecognised one is written down once instead of implied by a switch default.
+func perPeerFault(err error) bool {
+	return !shenguard.DeliveryFatal(deliveryOutcome(err))
 }
 
 // boundedSender is the control loop's only way onto the socket. It exists
@@ -153,7 +175,7 @@ func peerGone(err error) bool {
 //
 // So the bound lives here. Each send runs on its own goroutine; the loop waits
 // controlSendDeadline for it and otherwise walks away with errPeerNotDraining,
-// which peerGone reports as a departed peer so the existing dropClient path
+// which perPeerFault reports as one client's problem so the dropClient path
 // detaches the client and frees its control lease.
 //
 // The goroutine outlives the deadline. That is the honest cost of a driver with
@@ -249,19 +271,22 @@ func (b *boundedSender) forgetFinished() {
 }
 
 // dropClient runs, for a client that vanished mid-reply, the same teardown a
-// clean detach runs. Runtime.Detach removes the client from the session and,
+// clean detach runs. Runtime.PeerLost removes the client from the session and,
 // through the Shen rule mux.detach -> mux.release-if-owner, releases the
 // exclusive control lease when that client held it. Without that release a
 // departed browser tab leaves the lease parked on a client id nobody can reach
 // and no later client can type -- the same wedge internal/agent/bridge.go
 // fixes one layer up.
+//
+// The "was it even attached?" case is the model's (mux.reduce-peer-lost is
+// idempotent), not a condition repeated at each failure path.
 func dropClient(runtime *Runtime, fault *clientFault) {
 	if fault.client.IsZero() {
 		log.Printf("shenmux control: discarded a reply to an unidentified client: %v", fault.err)
 		return
 	}
-	if err := runtime.Detach(fault.client); err != nil && !errors.Is(err, shenguard.ErrNotAttached) {
-		log.Printf("shenmux control: client %s went away, detach failed: %v", fault.client, err)
+	if err := runtime.PeerLost(fault.client); err != nil {
+		log.Printf("shenmux control: client %s went away, teardown failed: %v", fault.client, err)
 		return
 	}
 	log.Printf("shenmux control: dropped client %s after a failed reply: %v", fault.client, fault.err)
@@ -448,12 +473,10 @@ func handleControl(
 		if err == nil {
 			return nil
 		}
-		// A reply that cannot be routed and a reply that cannot be encoded are
-		// both about the answer owed to one client; neither says the socket is
-		// unusable, so neither may end the session. Anything else on this path
-		// is a dead socket and stays fatal.
-		var encode *encodeFault
-		if peerGone(err) || errors.As(err, &encode) {
+		// This send was addressed to one identified client, so what it learned is
+		// about that client. Only an outcome the model calls fatal -- the socket
+		// itself -- may end the session.
+		if perPeerFault(err) {
 			return &clientFault{client: cid, err: err}
 		}
 		return err

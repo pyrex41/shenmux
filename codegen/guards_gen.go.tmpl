@@ -90,6 +90,29 @@ func NextSeq(s SeqNo) (SeqNo, error) {
 	return SeqNo{n: n}, nil
 }
 
+// Clock corresponds to Shen datatype clock: what time the host says it is, and
+// how long an unexercised control lease is still believed. Both are
+// milliseconds on a monotonic host reading; the model never reads a clock.
+type Clock struct{ now, lease uint64 }
+
+func NewClock(now, lease uint64) (Clock, error) {
+	if !mustBool("mux.valid-clock?", now, lease) {
+		return Clock{}, errors.New("clock rejected by Shen model")
+	}
+	return Clock{now: now, lease: lease}, nil
+}
+
+func (c Clock) Now() uint64   { return c.now }
+func (c Clock) Lease() uint64 { return c.lease }
+
+func clockValue(c Clock) shenmodel.List { return shenmodel.List{c.now, c.lease} }
+
+// DeliveryFatal reports whether a failure to deliver to one named client ends
+// the session for everyone. The answer lives in the Shen model so that adding a
+// new transport outcome cannot quietly change it: an outcome the host does not
+// recognise is per-peer, because it was learned at a send addressed to a peer.
+func DeliveryFatal(outcome string) bool { return mustBool("mux.delivery-fatal?", outcome) }
+
 // Dimensions corresponds to Shen datatype dimensions.
 type Dimensions struct{ cols, rows uint16 }
 
@@ -152,6 +175,9 @@ type Session struct {
 	exited       bool
 	controller   ClientID
 	pendingAttach ClientID
+	// heard is when the control owner last exercised control, not when it was
+	// last heard from. See specs/mux.shen.
+	heard uint64
 }
 
 func NewSession(dim Dimensions) (Session, error) {
@@ -174,6 +200,16 @@ func (s Session) Exited() bool               { return s.exited }
 func (s Session) ControlOwner() (ClientID, bool) { return s.controller, !s.controller.IsZero() }
 func (s Session) PendingAttach() (ClientID, bool) { return s.pendingAttach, !s.pendingAttach.IsZero() }
 
+// Heard is the instant at which the control owner last exercised control. It is
+// deliberately not a liveness signal and there is no accessor that reports one.
+func (s Session) Heard() uint64 { return s.heard }
+
+// OwnerFresh reports whether the recorded owner's claim is still inside the
+// lease window at this clock. A stale claim does not exclude a competing one.
+func OwnerFresh(s Session, clock Clock) bool {
+	return mustBool("mux.owner-fresh?", clockValue(clock), s.heard)
+}
+
 func IsAttached(s Session, cid ClientID) bool {
 	return mustBool("mux.member?", cid.String(), clientListValue(s.clients))
 }
@@ -194,8 +230,8 @@ func AcceptResize(s Session, cid ClientID) bool {
 	return !cid.IsZero() && mustBool("mux.accept-resize?", sessionValue(s), cid.String())
 }
 
-func AcquireControlOK(s Session, cid ClientID) bool {
-	return !cid.IsZero() && mustBool("mux.acquire-control-ok?", sessionValue(s), cid.String())
+func AcquireControlOK(s Session, clock Clock, cid ClientID) bool {
+	return !cid.IsZero() && mustBool("mux.acquire-control-ok?", sessionValue(s), clockValue(clock), cid.String())
 }
 
 func ReleaseControlOK(s Session, cid ClientID) bool {
@@ -245,20 +281,22 @@ func Detach(s Session, cid ClientID) (Session, error) {
 	return callSession("mux.detach", sessionValue(s), cid.String())
 }
 
-func AcquireControl(s Session, cid ClientID) (Session, error) {
+func AcquireControl(s Session, clock Clock, cid ClientID) (Session, error) {
 	if !IsAttached(s, cid) {
 		return Session{}, ErrNotAttached
 	}
 	if s.exited {
 		return Session{}, ErrExited
 	}
-	if owner, ok := s.ControlOwner(); ok && owner != cid {
+	// A recorded owner only excludes a competing claim while its claim is fresh;
+	// the model owns that judgement, so ask it rather than comparing here.
+	if owner, ok := s.ControlOwner(); ok && owner != cid && OwnerFresh(s, clock) {
 		return Session{}, ErrControlOwned
 	}
-	if !AcquireControlOK(s, cid) {
+	if !AcquireControlOK(s, clock, cid) {
 		return Session{}, errors.New("control acquisition rejected by Shen model")
 	}
-	return callSession("mux.acquire-control", sessionValue(s), cid.String())
+	return callSession("mux.acquire-control", sessionValue(s), clockValue(clock), cid.String())
 }
 
 func ReleaseControl(s Session, cid ClientID) (Session, error) {
@@ -356,7 +394,7 @@ func sessionValue(s Session) shenmodel.List {
 	control := shenmodel.List{controller, pending}
 	return shenmodel.List{
 		clientListValue(s.clients), s.lastSeq.n, snapshotValue(s.lastSnap), dimensionValue(s.dim),
-		s.writerLocked, s.exited, control,
+		s.writerLocked, s.exited, control, s.heard,
 	}
 }
 
@@ -386,7 +424,7 @@ func snapshotValue(snapshot Snapshot) shenmodel.List {
 
 func sessionFromValue(value any) (Session, error) {
 	list, ok := value.(shenmodel.List)
-	if !ok || len(list) != 7 {
+	if !ok || len(list) != 8 {
 		return Session{}, fmt.Errorf("Shen session transition returned %T with invalid shape", value)
 	}
 	clientValues, ok := list[0].(shenmodel.List)
@@ -432,6 +470,10 @@ func sessionFromValue(value any) (Session, error) {
 	if !ok || len(control) != 2 {
 		return Session{}, errors.New("Shen session control has invalid shape")
 	}
+	heard, ok := valueAsUint64(list[7])
+	if !ok {
+		return Session{}, fmt.Errorf("Shen session heard-at has type %T", list[7])
+	}
 	var controller ClientID
 	var pending ClientID
 	controllerValues, ok := control[0].(shenmodel.List)
@@ -454,7 +496,13 @@ func sessionFromValue(value any) (Session, error) {
 		pending, err = NewClientID(text)
 		if err != nil { return Session{}, err }
 	}
-	return Session{clients: clients, lastSeq: SeqNo{n: seq}, lastSnap: snapshot, dim: dim, writerLocked: locked, exited: exited, controller: controller, pendingAttach: pending}, nil
+	// Ownership evidence without an owner is a state the model never produces
+	// and the host must never be able to fabricate: it would make a later
+	// acquisition inherit a stranger's freshness.
+	if len(controllerValues) == 0 && heard != 0 {
+		return Session{}, errors.New("Shen session records control evidence with no owner")
+	}
+	return Session{clients: clients, lastSeq: SeqNo{n: seq}, lastSnap: snapshot, dim: dim, writerLocked: locked, exited: exited, controller: controller, pendingAttach: pending, heard: heard}, nil
 }
 
 func snapshotFromValue(value any) (Snapshot, error) {

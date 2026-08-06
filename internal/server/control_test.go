@@ -557,9 +557,13 @@ func TestControlServerSurvivesAReplyItCannotEncode(t *testing.T) {
 	if !errors.As(err, &encode) {
 		t.Fatalf("an unencodable reply must be an encodeFault, got %T: %v", err, err)
 	}
-	// The fatal path keys on everything that is not a client fault, so an
-	// encode failure reaching it would end the session.
-	if peerGone(err) {
-		t.Fatal("an encode failure must not be misreported as a departed peer")
+	// The fatal path keys on everything the model does not call per-peer, so an
+	// encode failure reaching it would end the session. It is one answer owed to
+	// one client, so mux.delivery-fatal? must say no.
+	if !perPeerFault(err) {
+		t.Fatal("an encode failure must not be treated as a dead socket")
+	}
+	if deliveryOutcome(err) != shenguard.DeliveryEncodeFault {
+		t.Fatalf("encode failure outcome = %q", deliveryOutcome(err))
 	}
 }
