@@ -1,12 +1,21 @@
 SHELL := /bin/bash
 BIN_DIR ?= bin
 
-.PHONY: all build web-build test test-relay test-deploy race vet guards guard-check audit shen bifrost check clean install demo
+.PHONY: all build web-build web-audit web-test test test-relay test-deploy race vet guards guard-check audit shen bifrost check clean install demo
 
 all: check build
 
 web-build:
 	npm run build --prefix web
+
+# internal/webui/app.bundle.js is committed and embedded, so a source edit that
+# skips the build ships nothing. `check` runs this instead of `web-build`: a
+# rebuild would hide the drift by fixing it in the working tree.
+web-audit:
+	./web/bundle-audit.sh
+
+web-test:
+	node --test 'internal/webui/*.test.mjs'
 
 build: web-build
 	mkdir -p $(BIN_DIR)
@@ -51,7 +60,7 @@ demo:
 bifrost:
 	./scripts/run-bifrost.sh
 
-check: web-build guard-check audit shen test vet
+check: web-audit web-test guard-check audit shen test vet
 	go build ./...
 	CGO_ENABLED=0 go build ./...
 

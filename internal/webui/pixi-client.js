@@ -1,5 +1,6 @@
 import { Application, BitmapFont, BitmapText, Container, Graphics } from "pixi.js";
 import Shen from "shen-script";
+import { instanceEndpoint, pageIdentity, refusalVerdict, socketURL } from "./gateway.mjs";
 
 (() => {
   "use strict";
@@ -13,9 +14,7 @@ import Shen from "shen-script";
   // Identity stamped into this page by the gateway that served it. A tab left
   // open from a previous `shenmux web` process carries the previous instance
   // id and is refused rather than silently taking over the new session.
-  const metaContent = (name) => document.querySelector(`meta[name="${name}"]`)?.content?.trim() || "";
-  const PAGE_INSTANCE = metaContent("shenmux-instance");
-  const PAGE_TOKEN = metaContent("shenmux-token");
+  const { instance: PAGE_INSTANCE, token: PAGE_TOKEN } = pageIdentity(document);
   const wrap = document.querySelector("#screen-wrap");
   const host = document.querySelector("#pixi-host");
   const empty = document.querySelector("#empty");
@@ -79,8 +78,7 @@ import Shen from "shen-script";
   // failed websocket handshake, so the reason for a refusal is read back here.
   async function gatewayIdentity() {
     try {
-      const query = PAGE_TOKEN ? `?token=${encodeURIComponent(PAGE_TOKEN)}` : "";
-      const response = await fetch(`/api/instance${query}`, { cache: "no-store" });
+      const response = await fetch(instanceEndpoint(PAGE_TOKEN), { cache: "no-store" });
       if (!response.ok) return null;
       return await response.json();
     } catch (_) {
@@ -500,13 +498,10 @@ import Shen from "shen-script";
       scheduleRender();
       event.preventDefault();
     }, { passive: false });
-    const scheme = location.protocol === "https:" ? "wss" : "ws";
     const connect = () => {
       reconnectTimer = undefined;
       if (blocked) return;
-      const query = new URLSearchParams({ instance: PAGE_INSTANCE });
-      if (PAGE_TOKEN) query.set("token", PAGE_TOKEN);
-      socket = new WebSocket(`${scheme}://${location.host}/ws?${query}`);
+      socket = new WebSocket(socketURL(location, PAGE_INSTANCE, PAGE_TOKEN));
       socket.onopen = () => {
         reconnectDelay = 250;
         setStatus(shen ? "connected · shen · pixi" : "connected · pixi", true);
@@ -521,12 +516,9 @@ import Shen from "shen-script";
         setStatus("disconnected · checking gateway");
         const identity = await gatewayIdentity();
         if (blocked) return;
-        if (identity && identity.instance && identity.instance !== PAGE_INSTANCE) {
-          blockPage("stale page · this tab belongs to a previous shenmux web session · reload to continue");
-          return;
-        }
-        if (identity && identity.authorized === false) {
-          blockPage("access refused · this page has no valid gateway token · open the URL printed by shenmux web");
+        const verdict = refusalVerdict(identity, PAGE_INSTANCE);
+        if (verdict.terminal) {
+          blockPage(verdict.message);
           return;
         }
         setStatus("disconnected · retrying");
