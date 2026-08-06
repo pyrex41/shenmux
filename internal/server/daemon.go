@@ -45,6 +45,13 @@ type processResult struct {
 
 // Serve owns one command, one authoritative PTY/VT state, and the two ZeroMQ
 // planes until the command exits or the context is canceled.
+// echoPollInterval bounds how long a client can keep predicting local echo
+// after the PTY has turned it off. A prediction made inside this window is
+// still corrected -- an unechoed glyph is discarded on mismatch or timeout --
+// but the interval decides how briefly a password character could appear, so
+// it is deliberately short rather than merely cheap.
+const echoPollInterval = 25 * time.Millisecond
+
 func Serve(ctx context.Context, cfg Config) error {
 	if cfg.Session == "" || cfg.ControlEndpoint == "" || cfg.DataEndpoint == "" {
 		return errors.New("session and endpoints must not be empty")
@@ -147,6 +154,15 @@ func Serve(ctx context.Context, cfg Config) error {
 	publisherErrors := runtime.PublisherErrors()
 	fatalErrors := runtime.FatalErrors()
 	controlErrors := control.Errors()
+
+	// Poll the PTY's ECHO bit. It is not in the escape stream, so nothing else
+	// reports it, and it can flip with no output at all -- a password prompt
+	// turns echo off before it prints. Clients gate local-echo prediction on
+	// it, so the window in which a prediction could paint a password character
+	// is bounded by this interval. An ioctl is cheap enough to poll tightly.
+	echoPoll := time.NewTicker(echoPollInterval)
+	defer echoPoll.Stop()
+
 	for proc == nil || !readFinished {
 		select {
 		case <-ctx.Done():
@@ -164,6 +180,10 @@ func Serve(ctx context.Context, cfg Config) error {
 			readFinished = true
 			if err != nil {
 				return err
+			}
+		case <-echoPoll.C:
+			if err := runtime.RefreshEcho(); err != nil {
+				return fmt.Errorf("refresh PTY echo state: %w", err)
 			}
 		case err, ok := <-controlErrors:
 			if !ok {

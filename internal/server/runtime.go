@@ -26,6 +26,14 @@ type PTY interface {
 	SetSize(shenguard.Dimensions) error
 }
 
+// echoReporter is the optional half of PTY that can report the line
+// discipline's ECHO bit. It is optional so existing PTY fakes keep working,
+// and the absence of it fails closed: echo stays false, so clients never
+// predict local echo for a PTY whose termios we cannot read.
+type echoReporter interface {
+	EchoEnabled() (bool, error)
+}
+
 type Publisher interface{ Publish(protocol.Message) error }
 
 type RuntimeConfig struct {
@@ -58,10 +66,16 @@ type Runtime struct {
 	historyDir   string
 	exitCode     int
 	closed       bool
-	closeOnce    sync.Once
-	closeErr     error
-	fatal        chan error
-	fatalOnce    sync.Once
+
+	// echoEnabled mirrors the PTY's termios ECHO bit. It is stamped onto every
+	// frame the runtime publishes, because the emulator sees only the escape
+	// stream and cannot know it. False until proven true, so a PTY that cannot
+	// report echo never invites a client to predict.
+	echoEnabled bool
+	closeOnce   sync.Once
+	closeErr    error
+	fatal       chan error
+	fatalOnce   sync.Once
 }
 
 func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
@@ -414,7 +428,7 @@ func (r *Runtime) Resize(cid shenguard.ClientID, dim shenguard.Dimensions) error
 	// From this point the emulator has performed a potentially non-reversible
 	// reflow. Any failure is an internal consistency failure, not a recoverable
 	// request error; continuing could publish a geometry different from the PTY.
-	frame, err := r.term.Snapshot()
+	frame, err := r.snapshotLocked()
 	if err != nil {
 		return r.failLocked(fmt.Errorf("snapshot resized terminal: %w", err))
 	}
@@ -466,7 +480,27 @@ func (r *Runtime) HandlePTYOutput(payload []byte) error {
 			return fmt.Errorf("queue terminal response: %w", err)
 		}
 	}
+	return r.publishFrameLocked()
+}
+
+// snapshotLocked takes the emulator's frame and stamps the PTY-owned echo bit
+// onto it. The emulator interprets only the escape stream, so ECHO -- which is
+// a termios property of the line discipline -- has to be merged in here, the
+// one place that owns both the emulator and the PTY.
+func (r *Runtime) snapshotLocked() (screen.Frame, error) {
 	frame, err := r.term.Snapshot()
+	if err != nil {
+		return screen.Frame{}, err
+	}
+	frame.Modes.Echo = r.echoEnabled
+	return frame, nil
+}
+
+// publishFrameLocked advances published state to the emulator's current frame
+// and emits a delta when anything changed. PTY output is the usual reason to
+// call it, but not the only one: the echo bit can flip with no output at all.
+func (r *Runtime) publishFrameLocked() error {
+	frame, err := r.snapshotLocked()
 	if err != nil {
 		return err
 	}
@@ -730,4 +764,31 @@ func ownerString(model shenguard.Session) string {
 		return ""
 	}
 	return owner.String()
+}
+
+// RefreshEcho re-reads the PTY's termios ECHO bit and publishes a delta when it
+// changed. The daemon polls this because echo can flip with no terminal output
+// at all -- `read -s` turns it off before printing anything -- and a client
+// that predicts local echo must learn about a password prompt promptly.
+//
+// A PTY that cannot report echo leaves it false, so prediction stays off rather
+// than being invited on a guess.
+func (r *Runtime) RefreshEcho() error {
+	reporter, ok := r.pty.(echoReporter)
+	if !ok {
+		return nil
+	}
+	enabled, err := reporter.EchoEnabled()
+	if err != nil {
+		// The fd can legitimately be gone while the session is winding down.
+		// Treat an unreadable termios as "do not predict" rather than fatal.
+		enabled = false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed || r.model.Exited() || r.echoEnabled == enabled {
+		return nil
+	}
+	r.echoEnabled = enabled
+	return r.publishFrameLocked()
 }

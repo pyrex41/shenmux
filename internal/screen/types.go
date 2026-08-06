@@ -82,6 +82,16 @@ type InputModes struct {
 	MouseSGR       bool
 	BracketedPaste bool
 	FocusEvents    bool
+
+	// Echo mirrors the PTY's termios ECHO bit: true when the line discipline
+	// echoes what is typed. It does not come from the escape stream -- the
+	// emulator cannot know it -- so the session daemon, which owns the master
+	// fd, stamps it onto each frame.
+	//
+	// It exists so a client can predict local echo safely. A client must
+	// predict only while this is true: at a password prompt it is false, and
+	// predicting there would paint the password on screen.
+	Echo bool
 }
 
 // Frame is the complete authoritative visible terminal state. It contains no

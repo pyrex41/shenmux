@@ -13,6 +13,7 @@ import (
 
 	"github.com/creack/pty/v2"
 	"github.com/pyrex41/shenmux/internal/shenguard"
+	"golang.org/x/sys/unix"
 )
 
 // PTY owns the master side and the child process attached to the slave side.
@@ -94,4 +95,17 @@ func (p *PTY) Close() error {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
+}
+
+// EchoEnabled reports whether the line discipline is currently echoing input,
+// by reading the master's termios ECHO bit. A shell echoes; a password prompt
+// turns it off. Clients use this to know when predicting local echo is safe,
+// so it must reflect the kernel's state rather than anything inferred from the
+// escape stream.
+func (p *PTY) EchoEnabled() (bool, error) {
+	termios, err := unix.IoctlGetTermios(int(p.master.Fd()), getTermiosReq)
+	if err != nil {
+		return false, fmt.Errorf("read PTY termios: %w", err)
+	}
+	return termios.Lflag&unix.ECHO != 0, nil
 }
