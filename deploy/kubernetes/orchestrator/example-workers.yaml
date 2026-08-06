@@ -25,9 +25,11 @@ spec:
   harness: pi
   interactive: true
 ---
-# A fork: clone fix-flaky-tests's volume (workspace + harness session state
-# + shenmux history) into a new worker that resumes the conversation and
-# diverges. Fork suspended workers for clean snapshots.
+# A fork: rehydrate fix-flaky-tests's state (workspace + harness session
+# files + shenmux history) into a new worker that resumes the conversation
+# and diverges. In overlay mode this restores the source's latest delta
+# checkpoint from object storage — O(delta), any node, any zone. Fork
+# suspended workers for clean lineage.
 apiVersion: shenmux.dev/v1alpha1
 kind: AgentWorker
 metadata:
@@ -37,8 +39,24 @@ spec:
   harness: codex
   prompt: "Try the quarantine-and-rewrite approach instead"
   workspace:
+    mode: overlay
     from:
       workerRef: fix-flaky-tests
+---
+# Pin a fork to a specific point in a worker's checkpoint chain rather than
+# its latest state.
+apiVersion: shenmux.dev/v1alpha1
+kind: AgentWorker
+metadata:
+  name: fix-flaky-tests-from-cp
+  namespace: agents
+spec:
+  harness: codex
+  interactive: true
+  workspace:
+    mode: overlay
+    from:
+      checkpointRef: cp_789
 ---
 # A suspended worker: pod deleted, PVC retained. Clear `suspend` to resume.
 apiVersion: shenmux.dev/v1alpha1

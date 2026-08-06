@@ -1,0 +1,31 @@
+# Karpenter NodePool sketch for the worker fleet (docs/K8S-ORCHESTRATION.md,
+# "Elastic capacity"). Overlay-mode workers checkpoint on preStop, so Spot
+# interruption degrades to an involuntary suspend; keep the shenmux
+# controller, the operator, and pvc-mode workers off this pool. The
+# EC2NodeClass (or cloud equivalent) is environment-specific and omitted.
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: shenmux-workers
+spec:
+  template:
+    metadata:
+      labels:
+        shenmux.dev/pool: workers
+    spec:
+      taints:
+        - key: shenmux.dev/workers
+          effect: NoSchedule
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: [spot, on-demand]
+      expireAfter: 720h
+      # Must cover a final upperdir checkpoint upload on drain.
+      terminationGracePeriod: 5m
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 2m
+  limits:
+    cpu: "256"
+    memory: 1Ti

@@ -61,19 +61,37 @@ spec:
                 workspace:
                   type: object
                   properties:
+                    mode:
+                      type: string
+                      enum: [overlay, pvc]
+                      default: overlay
+                      description: >-
+                        overlay = layered state over a shared base with
+                        content-addressed delta checkpoints in object
+                        storage (durable, forkable, Spot-safe). pvc = one
+                        PVC per worker, CSI snapshot clone for forks.
+                    base:
+                      type: string
+                      description: >-
+                        Overlay mode only: the shared read-only lower layer
+                        (image ref or seeded base name).
                     size:
                       type: string
                       default: 20Gi
                     storageClassName:
                       type: string
+                      description: pvc mode only.
                     from:
                       type: object
                       description: >-
-                        Fork source. The operator snapshots the source
-                        worker's PVC and provisions this worker's PVC from
-                        the snapshot. Exactly one field may be set.
+                        Fork source; exactly one field may be set. workerRef
+                        uses the source worker's latest checkpoint (overlay)
+                        or a fresh volume snapshot (pvc). checkpointRef
+                        names a specific checkpoint manifest.
                       properties:
                         workerRef:
+                          type: string
+                        checkpointRef:
                           type: string
                         volumeSnapshotRef:
                           type: string
@@ -106,6 +124,11 @@ spec:
                   type: string
                 forkedFrom:
                   type: string
+                lastCheckpoint:
+                  type: string
+                  description: >-
+                    Overlay mode: most recent checkpoint manifest ID; what a
+                    resume or interruption recovery restores from.
                 conditions:
                   type: array
                   items:

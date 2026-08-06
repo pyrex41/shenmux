@@ -73,8 +73,10 @@ Rules:
   logs. For `claude-managed` the runner is headless, so the session is an
   observation surface; for the CLI harnesses it is the full interaction
   surface — attach, take control, type into the agent, release control.
-- One PVC per worker, mounted at `/state`. Everything that defines the worker
-  lives under it, so suspend/resume/fork are operations on exactly one volume:
+- One state volume per worker, mounted at `/state` (backed by a PVC or an
+  overlayfs merged mount — see "State layers" below). Everything that defines
+  the worker lives under it, so suspend/resume/fork are operations on exactly
+  one tree:
 
 ```text
 /state
@@ -126,6 +128,63 @@ Exact resume flags and state paths per harness are pinned down during
 image-building (phase 0 below); the abstraction only requires that each
 harness has *some* file-backed session state and *some* resume invocation.
 
+## State layers, checkpoints, and forking
+
+Two storage modes, selected per worker (`spec.workspace.mode`):
+
+**`pvc` — simple mode.** One PVC per worker holds `/state`; suspend keeps
+the PVC, fork clones it via CSI `VolumeSnapshot` + `dataSourceRef`. No extra
+infrastructure, but forks are whole-volume operations, RWO volumes pin
+resume to one zone, and storage cost scales with full copies.
+
+**`overlay` — checkpoint mode, the intended default.** Layered state in the
+style of the autopsies snapshot model: a worker's `/state` is an overlayfs
+mount over a shared immutable base.
+
+```text
+lowerdir   shared read-only base: repo clone, toolchain, harness install
+upperdir   the worker's private delta, on node-local disk
+merged     /state as the worker sees it
+```
+
+A **checkpoint** is the upperdir streamed as a content-addressed archive to
+object storage plus a small manifest — parent checkpoint, git commit,
+harness session ref — the same manifest shape already sketched in
+[SESSION-HISTORY.md](SESSION-HISTORY.md). Because the base never changes, a
+checkpoint captures only the delta: cheap to take, cheap to store,
+deduplicated across the fleet. The lifecycle verbs become checkpoint
+operations:
+
+- **suspend** = final checkpoint upload, then the pod *and its node-local
+  state* are discarded entirely; the worker's durable identity is its
+  checkpoint chain, not a volume.
+- **resume** = on any node, in any zone: mount the base, lay the downloaded
+  checkpoint archive down as upperdir, remount, run the harness resume
+  invocation.
+- **fork** = resume from another worker's checkpoint under a new worker
+  identity. Forks are O(delta) rather than O(volume), and work cross-node,
+  cross-zone, even cross-cluster, because state rehydrates from object
+  storage instead of following a volume.
+
+Checkpoint triggers mirror SESSION-HISTORY.md's lifecycle hooks: on
+suspend, on fork request, on clean completion, periodically while running,
+and in the pod's `preStop` hook — so losing a node costs at most the
+since-last-checkpoint window.
+
+Mount mechanics: kernel overlayfs needs `CAP_SYS_ADMIN`, which conflicts
+with the restricted/gVisor posture the harness container should run under.
+Keep the mount out of the worker pod's trust domain: either a per-node
+**snapshot-agent DaemonSet** that prepares merged mounts and bind-mounts
+them into worker pods (and flushes upperdirs on drain), or `fuse-overlayfs`
+in an unprivileged sidecar. Worker containers only ever see the merged
+`/state`.
+
+In either mode, forking a live worker is crash-consistent; fork suspended
+workers for clean lineage. Overlay checkpoints and the git-based workspace
+checkpoints in SESSION-HISTORY.md compose rather than compete: the overlay
+delta is the coarse restore/fork unit, and git worktree state is the
+human-readable diff inside it.
+
 ## The orchestrator layer
 
 ### AgentWorker CRD
@@ -144,6 +203,7 @@ spec:
   interactive: false          # true = TUI idle, steer via shenmux
   suspend: false              # true = delete pod, keep PVC
   workspace:
+    mode: overlay             # overlay (checkpointed) | pvc (simple)
     size: 20Gi
     from:                     # omit for a fresh worker
       workerRef: refactor-auth   # fork: clone this worker's state
@@ -175,15 +235,12 @@ on `AgentWorker` deletion.
   controller workspace shows the same session again; `--history-dir` gives
   the terminal archive continuity across the pod boundary.
 - **fork** — create an `AgentWorker` whose `workspace.from` names a source
-  worker. The operator takes a CSI `VolumeSnapshot` of the source PVC and
-  provisions the new PVC from it (`dataSourceRef`). Because harness session
-  state is plain files under `/state`, cloning the volume clones the
-  conversation; the fork resumes it under a new worker identity and diverges.
-  For a clean fork, fork a **suspended** worker; forking a live worker is
-  allowed but crash-consistent (the snapshot may catch a mid-write state).
-  The finer-grained future is the git-based workspace-checkpoint manifest
-  described in [SESSION-HISTORY.md](SESSION-HISTORY.md); volume cloning is
-  the v1 mechanism because it needs no harness cooperation.
+  worker or a specific checkpoint. The operator materializes the source
+  state into the new worker — a checkpoint restore in overlay mode, a CSI
+  volume clone in pvc mode (see "State layers, checkpoints, and forking").
+  Because harness session state is plain files under `/state`, cloning the
+  state clones the conversation; the fork resumes it under a new worker
+  identity and diverges. Neither mechanism needs harness cooperation.
   - `claude-managed` caveat: the conversation lives on Anthropic's side and
     has no fork API; forking such a worker clones the workspace only and
     starts a fresh managed session against it.
@@ -236,6 +293,26 @@ authorization point for humans, the bridge, and orchestrator agents alike.
   trusted internal network; that work is already gated in
   [V1-V2-PLAN.md](V1-V2-PLAN.md).
 
+## Elastic capacity (Karpenter)
+
+Worker pods are the unit of scheduling, so node capacity should follow the
+fleet rather than be pre-provisioned:
+
+- A dedicated Karpenter `NodePool` (tainted `shenmux.dev/workers`) sized by
+  whatever `AgentWorker`s currently demand, consolidating to zero when the
+  fleet is suspended.
+- Fork swarms are the burst case: an orchestrator agent forking N approaches
+  creates N pods at once; Karpenter provisions just-in-time nodes and
+  consolidates them away as workers complete or suspend.
+- Overlay mode makes **Spot capacity safe** for workers: with periodic and
+  `preStop` checkpoints, a Spot interruption is just an involuntary
+  suspend — the operator marks the worker `Suspended` and resumes it on the
+  next node from its last checkpoint. Keep pvc-mode workers on on-demand
+  capacity (RWO volumes plus interruption is a worse story), and keep the
+  shenmux controller and the operator off the Spot pool.
+- The node termination grace window must cover a checkpoint upload; the
+  snapshot agent prioritizes flushing upperdirs on node drain.
+
 ## Net-new work this design requires
 
 In shenmux:
@@ -256,8 +333,13 @@ In shenmux:
 New components (this repo or a sibling):
 
 4. `AgentWorker` CRD + operator (spawn/suspend/resume/fork/GC).
-5. Claude-managed bridge (work-queue poller → CRs).
-6. Orchestration MCP server (verbs over the CR API).
+5. Snapshot-agent DaemonSet (overlay mounts, upperdir flush on drain) and a
+   content-addressed checkpoint store client for object storage.
+6. Claude-managed bridge (work-queue poller → CRs).
+7. Orchestration MCP server (verbs over the CR API).
+
+Karpenter itself is off-the-shelf; the design only adds a `NodePool` and
+interruption-aware suspend handling in the operator.
 
 ## Phasing
 
@@ -266,10 +348,12 @@ New components (this repo or a sibling):
   from the workspace; pin down each harness's state dirs and resume flags.
   No operator yet.
 - **Phase 1 — durable/resumable.** `AgentWorker` CRD + operator with
-  spawn/suspend/resume and PVC ownership; enrollment-mint API in the
-  controller.
-- **Phase 2 — forkable + managed.** `VolumeSnapshot`-based fork; the
-  claude-managed work-queue bridge with idempotent redelivery.
+  spawn/suspend/resume in pvc mode; enrollment-mint API in the controller.
+- **Phase 2 — forkable + managed.** Overlay mode: snapshot-agent DaemonSet,
+  checkpoint store, fork-from-checkpoint, Spot-friendly interruption
+  handling on a Karpenter `NodePool`; CSI `VolumeSnapshot` clone remains
+  the pvc-mode fallback. The claude-managed work-queue bridge with
+  idempotent redelivery.
 - **Phase 3 — orchestrator agents.** Orchestration MCP server; fleet
   grouping in the workspace using the advertised harness/workload/
   orchestrator metadata.
