@@ -1,0 +1,73 @@
+# Crossplane environment-stamping sketch (docs/K8S-ORCHESTRATION.md,
+# "Platform provisioning"). An AgentEnvironment claim renders everything a
+# worker fleet needs; the Composition (not shown — it is provider- and
+# cloud-specific) composes the namespace, quotas, checkpoint bucket + IAM,
+# per-harness credential secrets, Karpenter NodePool, default-deny
+# NetworkPolicies, and the shenmux controller install.
+apiVersion: apiextensions.crossplane.io/v1
+kind: CompositeResourceDefinition
+metadata:
+  name: xagentenvironments.shenmux.dev
+spec:
+  group: shenmux.dev
+  names:
+    kind: XAgentEnvironment
+    plural: xagentenvironments
+  claimNames:
+    kind: AgentEnvironment
+    plural: agentenvironments
+  versions:
+    - name: v1alpha1
+      served: true
+      referenceable: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [team]
+              properties:
+                team:
+                  type: string
+                harnesses:
+                  type: array
+                  items:
+                    type: string
+                    enum: [claude-managed, codex, pi, opencode]
+                checkpointBucket:
+                  type: object
+                  properties:
+                    retentionDays:
+                      type: integer
+                      default: 30
+                nodePool:
+                  type: object
+                  properties:
+                    capacityTypes:
+                      type: array
+                      items:
+                        type: string
+                        enum: [spot, on-demand]
+                    cpuLimit:
+                      type: string
+                      default: "256"
+                shenmuxControllerURL:
+                  type: string
+                  description: >-
+                    Existing controller to enroll agents against; the
+                    Composition installs one when omitted.
+---
+# One claim = one ready fleet environment.
+apiVersion: shenmux.dev/v1alpha1
+kind: AgentEnvironment
+metadata:
+  name: platform-team
+  namespace: agents
+spec:
+  team: platform
+  harnesses: [codex, pi, opencode]
+  checkpointBucket:
+    retentionDays: 60
+  nodePool:
+    capacityTypes: [spot, on-demand]

@@ -449,6 +449,37 @@ fleet rather than be pre-provisioned:
 - The node termination grace window must cover a checkpoint upload; the
   snapshot agent prioritizes flushing upperdirs on node drain.
 
+## Platform provisioning (Crossplane)
+
+Crossplane earns a place in two roles — with a deliberate line drawn
+around what it should *not* do:
+
+1. **Environment stamping.** An `AgentEnvironment` XRD + Composition
+   renders everything a fleet needs as one claim: the namespace and
+   quotas, the checkpoint bucket and its IAM/IRSA binding for the
+   snapshot agent, per-harness credential secrets, the Karpenter
+   `NodePool`, default-deny NetworkPolicies, and the shenmux controller
+   install. One claim = one ready fleet environment; per-team or
+   per-cluster fleets become claim-per-team, and the cloud-side pieces
+   (bucket, IAM) stay continuously reconciled by Crossplane's providers
+   in the same GitOps flow as the workers. This is Crossplane's sweet
+   spot and should be adopted as the way environments come to exist.
+2. **Optionally, the worker's provisioning half.** `AgentWorker`'s
+   render-a-set-of-resources portion — PVC, enrollment Secret, pod,
+   NetworkPolicy — could be a Composition (with a composition function
+   building the pod spec from the harness profile), shrinking the custom
+   operator. What must stay custom either way is the **lifecycle
+   brain**: the phase machine, suspend/resume sequencing, fork's
+   snapshot-then-provision ordering, checkpoint GC, and status for the
+   watch stream. Compositions reconcile toward a desired resource set;
+   they are the wrong tool for ordered stateful workflows, so fork and
+   checkpointing are never forced into one. Decide at Phase 1 whether
+   the operator embeds provisioning or delegates it to a Composition.
+
+Either way, Crossplane sits **behind** the CR API: `AgentWorker`,
+`muxwork`, RBAC, and the watch stream are unchanged and agents never see
+it.
+
 ## Net-new work this design requires
 
 In shenmux:
@@ -488,7 +519,10 @@ interruption-aware suspend handling in the operator.
   the Go `checkpoint` package that passes them — the format contract
   everything later builds against. No operator yet.
 - **Phase 1 — durable/resumable.** `AgentWorker` CRD + operator with
-  spawn/suspend/resume in pvc mode; enrollment-mint API in the controller.
+  spawn/suspend/resume in pvc mode; enrollment-mint API in the controller;
+  the `AgentEnvironment` Crossplane Composition for environment stamping,
+  and the decision on whether worker provisioning stays in the operator or
+  moves to a Composition.
 - **Phase 2 — forkable + managed.** Overlay mode: snapshot-agent DaemonSet,
   checkpoint store, fork-from-checkpoint, Spot-friendly interruption
   handling on a Karpenter `NodePool`; CSI `VolumeSnapshot` clone remains
