@@ -260,6 +260,8 @@ func runLogin(args []string, stdout, stderr io.Writer) error {
 	code := flags.String("code", "", "single-use enrollment code")
 	trustMode := flags.String("trust-mode", "", "relay content trust mode (trusted or blind)")
 	configFile := flags.String("config", "", "configuration file")
+	stateDir := flags.String("state-dir", "", "persistent state directory")
+	force := flags.Bool("force", false, "replace an existing device enrollment (destroys its keypair)")
 	flags.Usage = func() {
 		fmt.Fprintln(flags.Output(), "usage: shenmux login --controller URL")
 		flags.PrintDefaults()
@@ -278,6 +280,23 @@ func runLogin(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("resolve config file: %w", err)
 		}
+	}
+	if *stateDir != "" {
+		paths.StateDir, err = filepath.Abs(*stateDir)
+		if err != nil {
+			return fmt.Errorf("resolve state directory: %w", err)
+		}
+	}
+	// Enrolling writes a fresh keypair over whatever is in the state file.
+	// Refuse before touching anything, so a quickstart cannot silently
+	// destroy an enrollment the user cares about.
+	state, err := paths.LoadState()
+	if err != nil {
+		return err
+	}
+	if *code != "" && state.DeviceID != "" && !*force {
+		return fmt.Errorf("device %s is already enrolled in %s; rerun with --force to replace it (this destroys its keypair and the old device stays registered on the controller), or with --state-dir DIR to enroll alongside it",
+			state.DeviceID, paths.StateFile())
 	}
 	config, err := paths.LoadConfig()
 	if err != nil {
@@ -305,10 +324,6 @@ func runLogin(args []string, stdout, stderr io.Writer) error {
 	if *code == "" {
 		fmt.Fprintln(stdout, "device enrollment pending: rerun with --code CODE")
 		return nil
-	}
-	state, err := paths.LoadState()
-	if err != nil {
-		return err
 	}
 	if err := enrollDevice(normalized, *code, &state); err != nil {
 		return err
@@ -465,6 +480,8 @@ func runWeb(ctx context.Context, args []string, _ io.Writer, stderr io.Writer) e
 	control := flags.String("control", "", "muxd control endpoint")
 	data := flags.String("data", "", "muxd data endpoint")
 	historyDir := flags.String("history-dir", "", "durable session history directory (optional)")
+	token := flags.String("token", os.Getenv("SHENMUX_WEB_TOKEN"), "access token required to attach (generated when empty)")
+	noToken := flags.Bool("no-token", false, "serve without an access token; anything that can reach --listen may attach")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -484,20 +501,65 @@ func runWeb(ctx context.Context, args []string, _ io.Writer, stderr io.Writer) e
 	if *data == "" {
 		*data = dataDefault
 	}
-	server := &http.Server{Addr: *listen, Handler: webgateway.New(ctx, webgateway.Config{
+	// A loopback listener is not an authorization boundary: every local
+	// process shares it. The token is on by default, and the printed URL is
+	// the way in. --no-token is the deliberate opt-out.
+	accessToken := strings.TrimSpace(*token)
+	switch {
+	case *noToken:
+		if accessToken != "" {
+			return errors.New("--no-token and --token are mutually exclusive")
+		}
+	case accessToken == "":
+		accessToken, err = webgateway.NewToken()
+		if err != nil {
+			return err
+		}
+	}
+	gateway := webgateway.New(ctx, webgateway.Config{
 		Session: *session, ControlEndpoint: *control, DataEndpoint: *data, HistoryDir: *historyDir,
-	}).Handler()}
+		Token: accessToken,
+	})
+	server := &http.Server{Addr: *listen, Handler: gateway.Handler()}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = server.Shutdown(shutdown)
 	}()
-	log.New(stderr, "", 0).Printf("shenmux web session=%s listen=http://%s", *session, *listen)
+	logger := log.New(stderr, "", 0)
+	logger.Printf("shenmux web session=%s listen=http://%s instance=%s", *session, *listen, gateway.Instance())
+	logger.Printf("shenmux web url=%s", browserURL(*listen, accessToken))
+	if accessToken == "" {
+		logger.Printf("shenmux web: no access token (--no-token); any local process can attach to session %s", *session)
+	}
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
+}
+
+// browserURL turns a listen address into something a human can open. A
+// wildcard bind is printed as loopback because that is the address the person
+// running the command is sitting at.
+func browserURL(listen, token string) string {
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		host, port = listen, ""
+	}
+	switch strings.Trim(host, "[]") {
+	case "", "0.0.0.0", "::", "[::]":
+		host = "127.0.0.1"
+	}
+	authority := host
+	if port != "" {
+		authority = net.JoinHostPort(host, port)
+	}
+	target := &url.URL{Scheme: "http", Host: authority, Path: "/"}
+	if token != "" {
+		target.RawQuery = url.Values{"token": []string{token}}.Encode()
+	}
+	return target.String()
 }
 
 func runReserved(name string, args []string, stderr io.Writer) error {

@@ -13,9 +13,10 @@ make demo
 ```
 
 It builds what it needs, starts a session, a controller, an agent and the
-local browser gateway, enrolls itself, and prints the URL to open — usually
-<http://127.0.0.1:8787>, or the next free port if something else already has
-it. That is a real shell in a real terminal renderer. Type in it.
+local browser gateway, enrolls itself, and prints the URL to open. Open the URL
+it prints, not a bare `127.0.0.1:8787` — it carries an access token, and the
+port moves when something else already has 8787. That is a real shell in a real
+terminal renderer. Type in it.
 
 `make demo DEMO_ARGS=--detach` leaves it running; `scripts/demo.sh --stop`
 stops it. The demo keeps its state in its own directory, so it will not
@@ -42,6 +43,11 @@ Or attach from a browser on the same machine:
 ```sh
 ./bin/shenmux web --session work      # --listen 127.0.0.1:8787 by default
 ```
+
+It prints a URL containing an access token. Open that, not the bare address: a
+loopback port is not an authorization boundary, so without a token any local
+process — or a browser tab left open from a previous run — can attach and take
+the input lease. `--no-token` opts out if you want the old behaviour.
 
 `shenmux run` starts a login shell and restarts it when it exits. Pass a command
 after `--` for one shot, or `--keepalive=false`. `shenmux status` prints the

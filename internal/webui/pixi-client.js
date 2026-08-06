@@ -10,6 +10,12 @@ import Shen from "shen-script";
   const LINE_HEIGHT = 19;
   const MAX_COLS = 120;
   const MAX_ROWS = 48;
+  // Identity stamped into this page by the gateway that served it. A tab left
+  // open from a previous `shenmux web` process carries the previous instance
+  // id and is refused rather than silently taking over the new session.
+  const metaContent = (name) => document.querySelector(`meta[name="${name}"]`)?.content?.trim() || "";
+  const PAGE_INSTANCE = metaContent("shenmux-instance");
+  const PAGE_TOKEN = metaContent("shenmux-token");
   const wrap = document.querySelector("#screen-wrap");
   const host = document.querySelector("#pixi-host");
   const empty = document.querySelector("#empty");
@@ -41,11 +47,46 @@ import Shen from "shen-script";
   // visible while offline, but never apply deltas from the old stream to it.
   let reconnectTimer;
   let reconnectDelay = 250;
+  // Set when the gateway will never accept this page again. Retrying then is
+  // noise, so the page stops and says what to do instead.
+  let blocked = false;
 
   const setStatus = (text, good = false) => {
     status.textContent = text;
     status.style.color = good ? "#65e6a7" : "#748294";
   };
+
+  function blockPage(message) {
+    blocked = true;
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = undefined;
+    }
+    setStatus(message);
+    empty.hidden = false;
+    empty.textContent = message;
+    if (socket) {
+      socket.onclose = null;
+      socket.onerror = null;
+      try { socket.close(); } catch (_) { /* already closing */ }
+      socket = undefined;
+    }
+    acquireButton.disabled = true;
+    releaseButton.disabled = true;
+  }
+
+  // Asks the gateway who it is. A browser cannot see the HTTP status of a
+  // failed websocket handshake, so the reason for a refusal is read back here.
+  async function gatewayIdentity() {
+    try {
+      const query = PAGE_TOKEN ? `?token=${encodeURIComponent(PAGE_TOKEN)}` : "";
+      const response = await fetch(`/api/instance${query}`, { cache: "no-store" });
+      if (!response.ok) return null;
+      return await response.json();
+    } catch (_) {
+      return null; // the gateway is down; that is a retry, not a refusal
+    }
+  }
   const color = (value, fallback) => value && value.Valid
     ? ((value.R << 16) | (value.G << 8) | value.B) : fallback;
   const send = (message) => {
@@ -191,6 +232,7 @@ import Shen from "shen-script";
   }
 
   function renderFrame() {
+    if (blocked) return; // keep the refusal on screen instead of a dead frame
     const frame = state?.screen?.Frame;
     if (!frame?.Lines) { empty.hidden = false; return; }
     empty.hidden = true;
@@ -461,7 +503,10 @@ import Shen from "shen-script";
     const scheme = location.protocol === "https:" ? "wss" : "ws";
     const connect = () => {
       reconnectTimer = undefined;
-      socket = new WebSocket(`${scheme}://${location.host}/ws`);
+      if (blocked) return;
+      const query = new URLSearchParams({ instance: PAGE_INSTANCE });
+      if (PAGE_TOKEN) query.set("token", PAGE_TOKEN);
+      socket = new WebSocket(`${scheme}://${location.host}/ws?${query}`);
       socket.onopen = () => {
         reconnectDelay = 250;
         setStatus(shen ? "connected · shen · pixi" : "connected · pixi", true);
@@ -471,13 +516,25 @@ import Shen from "shen-script";
         try { onMessage(JSON.parse(event.data)); }
         catch (error) { setStatus(`render error · ${error.message}`); console.error(error); }
       };
-      socket.onclose = () => {
+      socket.onclose = async () => {
+        if (blocked) return;
+        setStatus("disconnected · checking gateway");
+        const identity = await gatewayIdentity();
+        if (blocked) return;
+        if (identity && identity.instance && identity.instance !== PAGE_INSTANCE) {
+          blockPage("stale page · this tab belongs to a previous shenmux web session · reload to continue");
+          return;
+        }
+        if (identity && identity.authorized === false) {
+          blockPage("access refused · this page has no valid gateway token · open the URL printed by shenmux web");
+          return;
+        }
         setStatus("disconnected · retrying");
         if (reconnectTimer) return;
         reconnectTimer = setTimeout(connect, reconnectDelay);
         reconnectDelay = Math.min(5000, reconnectDelay * 2);
       };
-      socket.onerror = () => setStatus("connection error");
+      socket.onerror = () => { if (!blocked) setStatus("connection error"); };
     };
     connect();
   }

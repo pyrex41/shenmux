@@ -350,6 +350,11 @@ pick_port "$PREFERRED_CONTROLLER_PORT" "controller"; CONTROLLER_PORT="$PICKED_PO
 pick_port "$PREFERRED_WEB_PORT" "local web gateway";  WEB_PORT="$PICKED_PORT"
 CONTROLLER_URL="http://127.0.0.1:$CONTROLLER_PORT"
 WEB_URL="http://127.0.0.1:$WEB_PORT"
+# The gateway requires an access token, so a stale tab or another local process
+# cannot attach just by reaching the port. It generates one when not told;
+# supplying it here means the demo knows the URL to print without parsing logs.
+WEB_TOKEN="demo-$$-$(date +%s)"
+WEB_OPEN_URL="$WEB_URL/?token=$WEB_TOKEN"
 ok "controller $CONTROLLER_URL   local gateway $WEB_URL"
 
 # ---------------------------------------------------------------------------
@@ -419,12 +424,13 @@ start_service web "$BIN" web \
   --listen "127.0.0.1:$WEB_PORT" \
   --control "$CONTROL_ENDPOINT" \
   --data "$DATA_ENDPOINT" \
-  --history-dir "$HISTORY_DIR"
+  --history-dir "$HISTORY_DIR" \
+  --token "$WEB_TOKEN"
 wait_for "gateway answers /healthz" "$READY_TIMEOUT" GET "$WEB_URL/healthz" \
   || fail_with_log web "the local gateway never answered /healthz"
-wait_for "gateway serves the PixiJS client at /" "$READY_TIMEOUT" GET "$WEB_URL/" \
+wait_for "gateway serves the PixiJS client at /" "$READY_TIMEOUT" GET "$WEB_OPEN_URL" \
   || fail_with_log web "the local gateway never served its index page"
-history_live() { GET "$WEB_URL/api/history?session=$SESSION" | grep -q "\"session\":\"$SESSION\""; }
+history_live() { GET "$WEB_URL/api/history?session=$SESSION&token=$WEB_TOKEN" | grep -q "\"session\":\"$SESSION\""; }
 wait_for "history API has a checkpoint for '$SESSION'" "$READY_TIMEOUT" history_live \
   || fail_with_log web "the history API never returned a checkpoint"
 
@@ -438,7 +444,7 @@ cat <<EOF
 
 $(printf '\033[1;32m')================= shenmux demo is up =================$(printf '\033[0m')
 
-  $(printf '\033[1;32mOPEN THIS')  ->  $WEB_URL$(printf '\033[0m')
+  $(printf '\033[1;32mOPEN THIS')  ->  $WEB_OPEN_URL$(printf '\033[0m')
       The rich local terminal (PixiJS): real keyboard input, resize,
       colour, blinking cursor. This is the UI to judge the product by.
 
@@ -448,7 +454,7 @@ $(printf '\033[1;32m')================= shenmux demo is up =================$(pr
       limited keyboard input. Useful to see the relay work, not the good UI.
     $CONTROLLER_URL/sessions?subject=$SUBJECT
       Controller session inventory (JSON) — proves the agent is enrolled.
-    $WEB_URL/api/history?session=$SESSION
+    $WEB_URL/api/history?session=$SESSION&token=$WEB_TOKEN
       Durable session history (JSON) served by the local gateway.
 
   Terminal client instead of a browser:

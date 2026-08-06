@@ -3,10 +3,12 @@ package webgateway
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"net/http"
 	"net/url"
 	"os"
@@ -23,6 +25,22 @@ import (
 
 const commandTimeout = 5 * time.Second
 
+// The served page carries this process's identity so a tab left open from a
+// previous gateway cannot silently attach to a new one. The placeholders are
+// substituted per request; the file on disk never contains a real value.
+const (
+	instancePlaceholder = "__SHENMUX_INSTANCE__"
+	tokenPlaceholder    = "__SHENMUX_TOKEN__"
+)
+
+// Refusal reasons reported on the X-Shenmux-Refusal header and by
+// /api/instance, so the client can distinguish "this page is dead" from
+// "the server is restarting" instead of reconnect-looping forever.
+const (
+	RefusalStaleInstance = "stale_instance"
+	RefusalBadToken      = "bad_token"
+)
+
 // Config describes the existing muxd endpoints the browser gateway connects
 // to. muxd remains the owner of PTYs and terminal interpretation.
 type Config struct {
@@ -30,18 +48,38 @@ type Config struct {
 	ControlEndpoint string
 	DataEndpoint    string
 	HistoryDir      string
+	// Instance identifies this gateway process. An empty value is replaced by
+	// a freshly generated id, so every process always has one.
+	Instance string
+	// Token, when set, must accompany every attach and every history read.
+	// An empty token means the gateway is open to anything that can reach the
+	// listen address.
+	Token string
 }
 
 type Server struct {
-	root context.Context
-	cfg  Config
-	up   websocket.Upgrader
+	root     context.Context
+	cfg      Config
+	instance string
+	up       websocket.Upgrader
 }
 
 func New(parent context.Context, cfg Config) *Server {
+	instance := strings.TrimSpace(cfg.Instance)
+	if instance == "" {
+		generated, err := randomID(8)
+		if err != nil {
+			// A gateway without an identity would silently re-enable the
+			// stale-tab takeover, so fall back to a process-unique value
+			// rather than to the empty string.
+			generated = fmt.Sprintf("t%d", time.Now().UnixNano())
+		}
+		instance = generated
+	}
 	return &Server{
-		root: parent,
-		cfg:  cfg,
+		root:     parent,
+		cfg:      cfg,
+		instance: instance,
 		up: websocket.Upgrader{
 			ReadBufferSize:  4 << 10,
 			WriteBufferSize: 16 << 10,
@@ -57,17 +95,15 @@ func New(parent context.Context, cfg Config) *Server {
 	}
 }
 
+// Instance returns the identity this process embeds in the page it serves and
+// requires back on the websocket handshake.
+func (s *Server) Instance() string { return s.instance }
+
 func (s *Server) Handler() http.Handler {
 	files := http.FileServer(http.FS(webui.FS))
 	muxHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/" {
-			data, err := webui.FS.ReadFile("index.html")
-			if err != nil {
-				http.Error(w, "index unavailable", http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_, _ = w.Write(data)
+		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
+			s.serveIndex(w, r)
 			return
 		}
 		files.ServeHTTP(w, r)
@@ -77,16 +113,106 @@ func (s *Server) Handler() http.Handler {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ok\n"))
 	})
+	mux.HandleFunc("/api/instance", s.handleInstance)
 	mux.HandleFunc("/api/history", s.handleHistory)
 	mux.HandleFunc("/ws", s.handleWebSocket)
 	mux.Handle("/", muxHandler)
 	return mux
 }
 
+// serveIndex stamps this process's instance id, and the token when the caller
+// already presented a valid one, into the page. A page served without a valid
+// token still renders: it reports the missing token instead of failing with an
+// opaque connection error.
+func (s *Server) serveIndex(w http.ResponseWriter, r *http.Request) {
+	data, err := webui.FS.ReadFile("index.html")
+	if err != nil {
+		http.Error(w, "index unavailable", http.StatusInternalServerError)
+		return
+	}
+	token := ""
+	if s.cfg.Token != "" && s.tokenAccepted(r) {
+		token = s.cfg.Token
+	}
+	page := strings.NewReplacer(
+		instancePlaceholder, html.EscapeString(s.instance),
+		tokenPlaceholder, html.EscapeString(token),
+	).Replace(string(data))
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// A cached page would reintroduce exactly the staleness this identity is
+	// meant to catch.
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write([]byte(page))
+}
+
+// handleInstance lets a page that just lost its socket ask why. It is
+// deliberately unauthenticated: it reveals only this process's identity and
+// whether the token the caller already holds is the right one.
+func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(struct {
+		Instance      string `json:"instance"`
+		TokenRequired bool   `json:"token_required"`
+		Authorized    bool   `json:"authorized"`
+	}{Instance: s.instance, TokenRequired: s.cfg.Token != "", Authorized: s.tokenAccepted(r)})
+}
+
+// tokenAccepted reports whether the request carries this instance's token. A
+// gateway configured without a token accepts everything.
+func (s *Server) tokenAccepted(r *http.Request) bool {
+	if s.cfg.Token == "" {
+		return true
+	}
+	presented := r.URL.Query().Get("token")
+	if presented == "" {
+		presented = r.Header.Get("X-Shenmux-Token")
+	}
+	return subtle.ConstantTimeCompare([]byte(presented), []byte(s.cfg.Token)) == 1
+}
+
+type refusal struct {
+	Reason  string
+	Message string
+	Status  int
+}
+
+// checkHandshake gates attachment. Instance identity is checked first because
+// it names the specific failure a human hits: a tab from a dead gateway.
+func (s *Server) checkHandshake(r *http.Request) *refusal {
+	presented := r.URL.Query().Get("instance")
+	if presented != s.instance {
+		message := fmt.Sprintf("this page belongs to a previous shenmux web session (page instance %q, this gateway is %q); reload the page", presented, s.instance)
+		if presented == "" {
+			message = "this page carried no shenmux web instance id, so it belongs to a previous session or an older build; reload the page"
+		}
+		return &refusal{Reason: RefusalStaleInstance, Message: message, Status: http.StatusConflict}
+	}
+	if !s.tokenAccepted(r) {
+		return &refusal{Reason: RefusalBadToken, Message: "this gateway requires its access token; open the URL printed by shenmux web", Status: http.StatusUnauthorized}
+	}
+	return nil
+}
+
+func writeRefusal(w http.ResponseWriter, ref *refusal) {
+	w.Header().Set("X-Shenmux-Refusal", ref.Reason)
+	http.Error(w, ref.Message, ref.Status)
+}
+
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// Scrollback is session content; it gets the same gate as attaching.
+	if !s.tokenAccepted(r) {
+		writeRefusal(w, &refusal{Reason: RefusalBadToken, Message: "this gateway requires its access token; open the URL printed by shenmux web", Status: http.StatusUnauthorized})
 		return
 	}
 	if s.cfg.HistoryDir == "" {
@@ -138,6 +264,12 @@ type envelope struct {
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	// Refuse before the upgrade. A stale tab must never reach the attach and
+	// control-lease path, not even briefly.
+	if ref := s.checkHandshake(r); ref != nil {
+		writeRefusal(w, ref)
+		return
+	}
 	conn, err := s.up.Upgrade(w, r, nil)
 	if err != nil {
 		return
@@ -303,9 +435,27 @@ func (s *Server) writeError(conn *websocket.Conn, err error) {
 }
 
 func newClientID() (string, error) {
-	b := make([]byte, 12)
-	if _, err := rand.Read(b); err != nil {
+	id, err := randomID(12)
+	if err != nil {
 		return "", fmt.Errorf("generate browser client id: %w", err)
 	}
-	return "web-" + hex.EncodeToString(b), nil
+	return "web-" + id, nil
+}
+
+func randomID(n int) (string, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// NewToken returns an access token for one gateway process. It lives here so
+// the command and the gateway agree on the shape of the secret in the URL.
+func NewToken() (string, error) {
+	token, err := randomID(16)
+	if err != nil {
+		return "", fmt.Errorf("generate gateway access token: %w", err)
+	}
+	return token, nil
 }

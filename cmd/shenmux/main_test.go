@@ -180,3 +180,86 @@ func TestLoginEnrollsDeviceAgainstController(t *testing.T) {
 		t.Fatalf("device credentials were not persisted: %+v", state)
 	}
 }
+
+// enroll a device identity directly, standing in for a previous `login --code`.
+func seedEnrollment(t *testing.T, paths appstate.Paths, deviceID string) {
+	t.Helper()
+	state, err := paths.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.DeviceID = deviceID
+	state.DevicePublicKey = []byte("public")
+	state.DevicePrivateKey = []byte("private")
+	if err := paths.SaveState(state); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Enrolling writes a fresh keypair over the state file. Doing that silently to
+// someone following the quickstart destroys an enrollment they may care about,
+// so it must refuse and say how to proceed.
+func TestLoginRefusesToReplaceAnExistingEnrollment(t *testing.T) {
+	root := t.TempDir()
+	configFile := filepath.Join(root, "config", "config.json")
+	stateDir := filepath.Join(root, "state")
+	t.Setenv("SHENMUX_CONFIG_FILE", configFile)
+	t.Setenv("SHENMUX_STATE_DIR", stateDir)
+	paths := appstate.Paths{ConfigFile: configFile, StateDir: stateDir}
+	seedEnrollment(t, paths, "device-original")
+
+	var stdout, stderr bytes.Buffer
+	err := execute(context.Background(),
+		[]string{"login", "--controller", "http://127.0.0.1:1", "--code", "CODE"}, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("a second enrollment must not silently replace the first")
+	}
+	// The message has to name what is at stake and both ways forward.
+	for _, want := range []string{"device-original", "--force", "--state-dir"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal must mention %q, got: %v", want, err)
+		}
+	}
+
+	// Refusing is only worth anything if the keypair really is still there.
+	state, loadErr := paths.LoadState()
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if state.DeviceID != "device-original" || string(state.DevicePrivateKey) != "private" {
+		t.Fatalf("the existing enrollment must be untouched, got %+v", state.DeviceID)
+	}
+}
+
+// --force is the escape hatch, and --state-dir is the way to keep both.
+func TestLoginForceAndStateDirBypassTheRefusal(t *testing.T) {
+	root := t.TempDir()
+	configFile := filepath.Join(root, "config", "config.json")
+	stateDir := filepath.Join(root, "state")
+	t.Setenv("SHENMUX_CONFIG_FILE", configFile)
+	t.Setenv("SHENMUX_STATE_DIR", stateDir)
+	paths := appstate.Paths{ConfigFile: configFile, StateDir: stateDir}
+	seedEnrollment(t, paths, "device-original")
+
+	// Both of these proceed to real enrollment against an unreachable
+	// controller, so they must fail for a network reason, not the refusal.
+	for _, args := range [][]string{
+		{"login", "--controller", "http://127.0.0.1:1", "--code", "CODE", "--force"},
+		{"login", "--controller", "http://127.0.0.1:1", "--code", "CODE", "--state-dir", filepath.Join(root, "other")},
+	} {
+		var stdout, stderr bytes.Buffer
+		err := execute(context.Background(), args, &stdout, &stderr)
+		if err != nil && strings.Contains(err.Error(), "already enrolled") {
+			t.Fatalf("%v must get past the refusal, got: %v", args, err)
+		}
+	}
+
+	// --state-dir must not have touched the original either way.
+	state, err := paths.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.DeviceID != "device-original" {
+		t.Fatalf("--state-dir must leave the original enrollment alone, got %q", state.DeviceID)
+	}
+}
