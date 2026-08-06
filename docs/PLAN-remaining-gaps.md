@@ -5,12 +5,19 @@ Follow-on to `docs/PLAN-typing-and-robustness.md`, whose four items are done
 five came out of adversarial review and out of finishing the work. Every claim
 below was checked against the source rather than carried over from the review.
 
-Ordered by severity. Items 1 and 2 are correctness; 3 is a footgun that has
-already cost real time; 4 and 5 are hygiene.
+**Status: all closed.** Items 1-5 are fixed, 6 is fixed at the root, and 7 was
+decided against with the evidence recorded. Each section keeps its original
+analysis, because the reasoning is the part worth re-reading, and states its
+resolution at the top. Nothing here is outstanding.
 
 ---
 
 ## 1. A slow client can hang the control loop indefinitely
+
+**CLOSED.** `server.boundedSender` bounds each reply and folds expiry into
+`peerGone`, so the existing `dropClient` path frees the lease. The upstream fix
+is prepared in `patches/` and is not consumed; see item 7 for why we did not
+solve this by changing drivers instead.
 
 **Severity: high.** This is the departed-client failure again, upgraded from a
 crash to a hang, and it survives the fix that landed for the crash.
@@ -129,6 +136,11 @@ implements them — check before planning around it.
 
 ## 2. Three outcomes, one of them silent
 
+**CLOSED.** A malformed frame count is answered: the check moved below identity
+parsing and the receive cap was raised above the real limit so the sender can be
+named, which costs no buffering because the driver has already read the whole
+message. The one genuinely unanswerable case is documented in `PROTOCOL.md`.
+
 **Severity: medium.** `handleControl` can now reply, be fatal, or **silently
 drop a message**. The third is neither documented on `Errors()` nor visible to
 the client, which hangs until its own timeout with no idea why.
@@ -161,6 +173,10 @@ reasoning.
 
 ## 3. `internal/webui/app.js` is dead code, and the bundle can silently go stale
 
+**CLOSED.** `app.js` deleted. `web/bundle-audit.sh` runs in `make check` and
+fails on drift; `check` runs it *instead of* `web-build`, since a rebuild there
+would repair the drift and pass.
+
 **Severity: medium — it has already cost real time twice today.**
 
 `app.js` is referenced by nothing: not `index.html`, not `files.go`, not
@@ -189,6 +205,9 @@ already applies to generated Go, so it fits the house style.
 
 ## 4. The browser client has no test coverage at all
 
+**CLOSED.** The pure handshake logic moved to `internal/webui/gateway.mjs` with
+18 `node --test` cases wired in as `make web-test`.
+
 **Severity: medium.** The JS test suite went away with the predictive-echo
 revert, and there is now no `*.test.mjs` anywhere.
 
@@ -211,6 +230,9 @@ renderer.
 ---
 
 ## 5. One echo test asserts nothing
+
+**CLOSED.** The subtest now publishes a real frame first, so the assertion has
+something to be wrong about instead of reading the helper's zero value.
 
 **Severity: low.** In `internal/server/echo_test.go`, the
 `TestEchoFailsClosed/"pty cannot report echo"` subtest ends with
@@ -270,46 +292,52 @@ session model never learns the stream existed. See `docs/WHAT-THE-SPEC-OWNS.md`.
 
 ---
 
-## 7. We may be on the wrong ZeroMQ driver
+## 7. Should we move to go-zeromq/zmq4? DECIDED: no.
 
-**Severity: worth a spike before more patching.**
+`pyrex41/shen-extensions` ships a ZeroMQ surface in Shen over a ten-primitive
+host waist, and its shen-go backend binds `github.com/go-zeromq/zmq4` — a
+different driver from the `tomi77/zmq4` here. It looked promising for one
+reason and was rejected for a worse one.
 
-`pyrex41/shen-extensions` ships a ZeroMQ surface written once in Shen
-(`shen/x/zmq.shen`) over a ten-primitive host waist, and its **shen-go backend
-is shipped** — bound to `github.com/go-zeromq/zmq4`, which is a *different*
-driver from the `github.com/tomi77/zmq4` this repo uses.
+**The attraction was real.** `go-zeromq/zmq4`'s router derives a genuine
+deadline from a settable option (`router.go:37`), where ours takes a context and
+discards it. That single line is the root of gap 1, of `server.boundedSender`,
+and of the patch in `patches/`.
 
-That matters because of one line. `go-zeromq/zmq4`'s router (`router.go:37`):
+**The disqualifier: it cannot report a per-peer delivery failure at all.**
+`routerMWriter.write` (`router.go:226`) walks its connections, skips every one
+whose identity does not match, and if none match the loop body simply never
+runs — `grp.Wait()` returns nil and **the message is silently discarded**. That
+is libzmq's default ROUTER behaviour, and there is no `ROUTER_MANDATORY`
+equivalent to turn it off (no match for "mandatory" anywhere in the package).
 
-```go
-func (router *routerSocket) Send(msg Msg) error {
-	ctx, cancel := context.WithTimeout(router.sck.ctx, router.sck.Timeout())
-	defer cancel()
-	return router.sck.w.write(ctx, msg)
-}
-```
+We would lose `ErrNoRoute`, and with it the distinction the control plane is now
+built on. `peerGone` would never fire, so `dropClient` would never run, so a
+departed client's control lease would never be released on the failure path —
+the exact wedge, returned in a form we could no longer even observe, because
+the send would report success.
 
-It derives a real deadline from a settable `WithTimeout` option. Our driver's
-`ROUTER.Send` takes a context and discards it, which is the root of gap 1, of
-`server.boundedSender`, and of the patch in `patches/`. A driver that honours a
-send deadline retires that whole line of work rather than working around it.
+Two further gaps, smaller but pointing the same way:
 
-**Do not switch on this basis alone.** Verify first:
+- **No HWM for ROUTER.** `socket.SetOption` is `sck.props[name] = value; return
+  nil` under a `FIXME(sbinet) different socket types support different options`.
+  Only PUB reads `OptionHWM`. Setting the 10_000 HWMs this repo relies on would
+  return nil and do nothing — the accept-and-ignore trap we just spent a day
+  removing from `zmqx`.
+- **No frame bound either.** Nothing caps a frame body before it is read, so
+  gap 5 would not be fixed by switching; it would just move.
 
-- **Option coverage.** shenmux sets `SndHWM`/`RcvHWM` to 10_000 and
-  `MaxMsgSize`. The Shen waist exposes only `rcvtimeo`, `sndtimeo`, `subscribe`,
-  `unsubscribe`, `linger`, so going through `shen.x.zmq` would lose the HWMs.
-  Going directly to `go-zeromq/zmq4` may not; check its `SetOption` surface.
-- **Allocation bound.** Gap 5 is unfixable on the current driver. Does this one
-  bound a frame before reading it?
-- **ROUTER identity semantics.** Our control plane depends on the identity frame
-  and on `ErrNoRoute`-style per-peer failures being distinguishable from a dead
-  socket. Confirm the equivalent exists.
-- **Cost.** The data path is PTY deltas at high frequency. Routing that through
-  the Shen waist adds a Shen call per message, which is a different proposition
-  from calling the Go library directly. Measure before assuming.
+**Decision: stay on `tomi77/zmq4`.** A driver that silently drops is worse for
+this control plane than one that blocks, because blocking is observable and we
+have bounded it. `server.boundedSender` is the right response and stays. The
+patch in `patches/` remains the upstream fix worth landing.
 
-Two separable questions, and they should be decided separately: *which driver*
-(a contained dependency swap, and the one with the evidence behind it), and
-*whether socket I/O should go through Shen at all* (an architecture change whose
-cost is on the hot path). The first can be answered without the second.
+**Reopen this only if** `go-zeromq/zmq4` grows a mandatory-routing mode. The
+send-deadline advantage is genuine and would be worth revisiting the moment a
+per-peer failure becomes reportable.
+
+**Separately, and still open as a question rather than a gap:** whether socket
+I/O should route through the Shen waist at all. That is an architecture
+decision whose cost lands on the PTY delta hot path — one Shen call per message
+— and it is independent of which driver sits underneath. It should be measured,
+not assumed, and it is not blocking anything today.
