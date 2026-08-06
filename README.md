@@ -1,230 +1,159 @@
 # shenmux
 
-shenmux is an experimental terminal multiplexer for one or more named PTY
-sessions. A session runs on the machine that starts it. Local clients connect
-over owner-only ZeroMQ IPC; an optional development controller can relay the
-same session protocol over WebSockets.
+A terminal multiplexer. `shenmux run` owns a PTY on some machine; clients attach
+to it by name — a native TTY client, a local browser terminal, or a browser on
+another machine relayed through a controller. It is a development tool. Nothing
+here is deployed to the public Internet.
 
-The local runtime is the usable core today. The controller, agent, remote
-workspace, blind-stream primitives, and Tailscale path are implemented and
-tested as development building blocks, but the repository does **not** yet ship
-a production-ready hosted service or self-hosting package.
-
-## What can I run?
-
-| Goal | Commands | Status |
-| --- | --- | --- |
-| Local shell in the browser | `shenmux run` and `shenmux web` | Working local development path |
-| Local shell from a native client | `shenmux run` and `muxctl` | Working local development path |
-| Relay a running session through a controller | `shenmux controller`, `shenmux login`, and `shenmux agent` | Working development path; trusted browser only |
-| Public or multi-user service | — | Requires deployment and security work listed below |
-
-The controller and agent do not create or preserve PTYs. Start `shenmux run`
-on the agent host first; the agent only bridges controller streams to that
-session's local IPC endpoints.
-
-## Build
-
-The supported runtime platforms are Linux and macOS with Go 1.26+. The
-default runtime is pure Go: it does not require a C toolchain, libzmq, or
-CGO. The Nix development shell supplies Go and the other development tools.
+## See it work
 
 ```sh
 nix develop
-make build
+make demo
 ```
 
-This creates `bin/shenmux`, `bin/muxd`, `bin/muxctl`, and
-`bin/shenmux-web`. The PTY layer uses `creack/pty`, and the local messaging
-layer speaks ZMTP through `github.com/tomi77/zmq4`; both work with
-`CGO_ENABLED=0`. Windows PTY support is not implemented.
+It builds what it needs, starts a session, a controller, an agent and the
+local browser gateway, enrolls itself, and prints the URL to open — usually
+<http://127.0.0.1:8787>, or the next free port if something else already has
+it. That is a real shell in a real terminal renderer. Type in it.
 
-## Quick start: local
+`make demo DEMO_ARGS=--detach` leaves it running; `scripts/demo.sh --stop`
+stops it. The demo keeps its state in its own directory, so it will not
+disturb an enrollment you already have.
 
-Start a named session:
+## The pieces, by hand
+
+`shenmux run` is the only thing that creates a PTY. Nothing else in this
+repository does — not the gateway, not the controller, not the agent. Start it
+first, on the machine that should own the shell:
 
 ```sh
 ./bin/shenmux run --session work
 ```
 
-In another terminal, start the local browser gateway:
+Attach from a terminal:
 
 ```sh
-./bin/shenmux web --session work
+./bin/muxctl -session work            # -observe for read-only
 ```
 
-Open <http://127.0.0.1:8787>. The gateway listens on loopback by default and
-has no authentication. Keep it local. To use the terminal client instead:
+Or attach from a browser on the same machine:
 
 ```sh
-./bin/muxctl -session work
+./bin/shenmux web --session work      # --listen 127.0.0.1:8787 by default
 ```
 
-`shenmux run` starts a login shell and, by default, restarts it after exit.
-Pass a command after `--` for a one-shot session, or use `--keepalive=false`.
-The older `muxd`, `muxctl`, and `shenmux-web` commands remain available;
-notably, legacy `muxd` defaults to `-keepalive=false`.
+`shenmux run` starts a login shell and restarts it when it exits. Pass a command
+after `--` for one shot, or `--keepalive=false`. `shenmux status` prints the
+config, the state directory, and the sessions this binary has started.
 
-## Quick start: development controller
+### There are two browser UIs. Use the right one.
 
-This example is for a private development network. It enables the deliberately
-insecure browser subject shortcut and uses plain HTTP.
+`shenmux web` serves the real one, from `internal/webui/`: PixiJS renderer,
+full keyboard, resize, colour, paste, mouse modes, blinking cursor.
 
-On the controller host:
+The controller's `/workspace` (`internal/relay/workspace.js`) is a different,
+much smaller client that exists to exercise enrollment, capabilities and relay
+framing. It handles printable keys, Enter and Backspace, sends no resize, and
+paints plain DOM at whatever size the session already has (80x24 by default). If
+you land there first you will conclude the terminal is broken. It isn't; you are
+in the test harness.
+
+### Control is exclusive and cannot be stolen
+
+One client holds the input lease at a time. If another client has it, your
+"take control" request fails and you get a session you can watch but not type
+into. That is deliberate, not a bug. Detach the other client, or release control
+from it, and try again.
+
+## Remote through a controller
+
+Private network only. This uses plain HTTP and turns on a deliberately insecure
+browser-identity shortcut.
 
 ```sh
-./bin/shenmux controller \
-  --listen 127.0.0.1:8788 \
-  --origin http://127.0.0.1:8788 \
-  --dev-browser-subject local-test
+# controller host
+./bin/shenmux controller --listen 127.0.0.1:8788 \
+  --origin http://127.0.0.1:8788 --dev-browser-subject local-test
 ```
 
-The controller prints a single-use enrollment code to stderr. It expires in
-ten minutes. On the machine that owns the PTY, start the session and enroll the
-agent:
+It prints one single-use enrollment code to stderr, good for ten minutes. On the
+host that owns the PTY:
 
 ```sh
 ./bin/shenmux run --session work
-
-./bin/shenmux login \
-  --controller http://127.0.0.1:8788 \
-  --code CODE_FROM_CONTROLLER
-
-./bin/shenmux agent \
-  --controller http://127.0.0.1:8788 \
-  --transport relay \
-  --session work
+./bin/shenmux login --controller http://127.0.0.1:8788 --code CODE
+./bin/shenmux agent --controller http://127.0.0.1:8788 \
+  --transport relay --session work
 ```
 
-Open
-<http://127.0.0.1:8788/workspace?subject=local-test>. For different hosts,
-replace loopback with a private reachable address and keep `--origin` equal to
-the URL used by the agent. `shenmux login` permits plain HTTP only for
-localhost or an IP address; named controller hosts must use HTTPS.
+Open <http://127.0.0.1:8788/workspace?subject=local-test> — and re-read the
+two-UIs warning above before you judge it.
 
-The remote workspace currently uses trusted relay mode, basic keyboard input,
-and a simple screen renderer. It does not implement the richer local browser
-client's full input and resize behavior. See [the browser guide](docs/WEB.md).
-
-## Trust modes
-
-- `trusted` is the default and the only mode used by the bundled controller
-  workspace. TLS can protect the network hop, but the controller can read
-  terminal output and input.
-- `blind` is an implemented protocol/library path. It performs an
-  authenticated X25519/Ed25519 handshake and encrypts inner session frames so
-  the relay sees routing metadata and ciphertext. No bundled user-facing
-  browser or native command initiates that handshake yet.
-
-`shenmux login --trust-mode blind ...` persists a minimum mode on the agent.
-With the bundled trusted workspace this intentionally makes attachment fail;
-use it only while developing a compatible blind client. It is not a switch
-that upgrades the bundled browser.
-
-See [the trust model](docs/TRUST-MODEL.md) for the exact guarantees and gaps.
-
-## Transport choices
-
-The `agent` supports:
-
-- `--transport relay`: connect to the configured controller's `/ws` endpoint;
-- `--transport auto`: try a configured direct endpoint first, then the
-  controller URL; without a direct endpoint it is relay-only;
-- `--transport tailscale`: require the configured direct endpoint.
-
-A direct endpoint is another reachable controller `/ws` listener, not a
-browser-to-agent connection. Supply one explicitly:
+`shenmux login` overwrites your device identity. It writes `device_id` and the
+device keypair into `~/.local/state/shenmux/state.json`, replacing whatever was
+there, and there is no flag to stop it. If you already have an enrollment you
+care about, point the command somewhere else first:
 
 ```sh
-./bin/shenmux agent \
-  --controller https://controller.example \
-  --transport auto \
-  --direct tailscale://100.64.0.2:8788/ws \
-  --session work
+SHENMUX_STATE_DIR=/tmp/other-enrollment \
+SHENMUX_CONFIG_FILE=/tmp/other-enrollment/config.json \
+  ./bin/shenmux login --controller http://127.0.0.1:8788 --code CODE
 ```
 
-Or use `--tailscale-peer NAME`; shenmux calls the local `tailscale` CLI to find
-and ping the peer. `tailscale://` and `wireguard://` are normalized to plain
-WebSocket because the private network supplies hop encryption. `auto` falls
-back after connection failure; it is not live stream migration.
+Those two environment variables are the only isolation available. `make demo`
+sets them for you.
 
-## State and restarts
+Across hosts, replace loopback with a reachable private address and keep
+`--origin` equal to the URL the agent uses. `shenmux login` allows plain HTTP
+only for `localhost` or a bare IP; a named host must be HTTPS. `--transport
+tailscale` or `--transport auto --direct tailscale://HOST:8788/ws` sends the
+agent over a tailnet instead of the relay; `auto` falls back to the relay when
+the direct endpoint fails to connect, which is a reconnect, not stream
+migration.
 
-By default, user configuration is stored in
-`$XDG_CONFIG_HOME/shenmux/config.json` (or `~/.config/shenmux/config.json`),
-and agent/runtime metadata is stored in `$XDG_STATE_HOME/shenmux` (or
-`~/.local/state/shenmux`). `SHENMUX_CONFIG_FILE` and `SHENMUX_STATE_DIR`
-override them.
+## What is actually true
 
-```sh
-./bin/shenmux status
-./bin/shenmux status --json
-```
+Works: local sessions, the native client, the local browser terminal,
+enrollment, the relay path, tailnet transport, reconnect with backoff.
 
-The state file contains device credentials, reconnect metadata, and a list of
-sessions observed by `shenmux run`. That list is informational; it is not a
-process supervisor or durable terminal journal. Stopping `shenmux run` or
-rebooting its host ends the PTY.
+Does not:
 
-The development controller stores `enrollment.json` and `policy.json` beneath
-its `--state-dir`. Codes, device records, grants, capabilities, leases, and
-audit metadata use those files, while live agent presence and streams remain
-in memory. Backing up this directory does not back up terminal state.
+- **The controller can read your terminal.** Trusted relay mode is the default
+  and the only mode any bundled client speaks. TLS would protect the wire, not
+  the controller.
+- **Blind mode has no client.** The handshake, encryption and tests exist as
+  library code. Nothing shipped here initiates it. `login --trust-mode blind`
+  makes the agent reject the bundled workspace, which is the point, but it
+  leaves you with no working browser.
+- **No production hosting and no multi-user story.** The browser identity
+  fallback trusts an `X-Shenmux-Subject` header. There is no TLS, no origin
+  policy, no rate limiting, no admin workflow for grants or revocation. The
+  checked-in Dockerfile and `fly.toml` still package the legacy `muxd` shape.
+  See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+- **The controller's session list is memory-only and believes the agent.** It
+  lists the names passed to `shenmux agent --session/--sessions`. Nothing
+  reconciles that against processes that are actually running, and it is gone
+  when the controller restarts.
+- **No Windows PTY.** Linux and macOS, Go 1.26+.
+- **Nothing survives the session.** Kill `shenmux run` or reboot its host and
+  the PTY is gone. Checkpoints and deltas are in memory.
 
-## Production status
+The default build is pure Go: no CGO, no libzmq, no C toolchain. `-tags
+libghostty` swaps in the libghostty-vt terminal adapter and needs both.
 
-Do not expose the built-in controller or local browser gateway directly to the
-Internet. A real deployment still needs, at minimum:
-
-- TLS termination and strict WebSocket origin policy;
-- real browser authentication (the current fallback trusts an
-  `X-Shenmux-Subject` header) and an administrator-facing grant/revocation
-  workflow;
-- rate limits, request/body limits at the edge, credential rotation, and
-  recovery procedures;
-- a reviewed durable/concurrent data store, migrations, backups, monitoring,
-  and an availability design;
-- production images/packages and corrected service/Kubernetes wiring;
-- a shipped blind-capable client if relay confidentiality is required.
-
-The checked-in deployment files are design examples, not a supported release:
-the root Dockerfile and `fly.toml` still package the legacy `muxd` TCP shape,
-and the controller/sidecar manifests assume an image and production integration
-that this repository does not currently build. Read
-[deployment status and requirements](docs/DEPLOYMENT.md) before using them.
-
-## How the implementation fits together
-
-- `shenmux run` owns the PTY, terminal model, bounded in-memory checkpoint and
-  delta tail, and local ZeroMQ ROUTER/XPUB sockets.
-- The Shen reducer authorizes session transitions and returns effects; Go
-  performs PTY, terminal, socket, persistence, and network effects.
-- Local clients attach with a checkpoint and then consume ordered deltas. A
-  sequence gap triggers resynchronization.
-- `shenmux agent` maintains an authenticated outbound WebSocket and maps remote
-  streams to local sessions.
-- `shenmux controller` enrolls devices, authenticates agent connections,
-  issues browser capabilities, tracks control leases, and forwards frames.
-
-Details are in [architecture](docs/ARCHITECTURE.md),
-[protocol](docs/PROTOCOL.md), [browser clients](docs/WEB.md), and the
-[implementation plan](docs/V1-V2-PLAN.md).
-
-## Test
+## Tests
 
 ```sh
-nix develop --command make check
+nix develop --command make check   # web bundle, Shen guards + gate, go test, vet, both builds
 nix develop --command make race
 ```
 
-`make check` rebuilds the web bundle, checks generated Shen guards, runs the
-Shen verification gate, Go tests and vet, and both native and CGO-disabled
-builds.
-`make race` runs the Go race detector. Focused targets are `make test-relay`
-and `make test-deploy`; the latter is currently a compile check, not an
-end-to-end deployment test.
+`make test-deploy` is a compile check, not a deployment test.
 
-The optional `libghostty-vt` adapter requires compatible headers, a library,
-and CGO; select it with `-tags libghostty`. The default build uses the basic
-Go terminal implementation and remains CGO-free. Running the terminal in
-Ghostty is therefore an opt-in build choice, not a runtime dependency.
+## More
+
+- [docs/WEB.md](docs/WEB.md) — both browser clients in detail, and the latency benchmark
+- [docs/TRUST-MODEL.md](docs/TRUST-MODEL.md) — what is guaranteed, what is not
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — how run/web/agent/controller fit together
+- [docs/PROTOCOL.md](docs/PROTOCOL.md) — the wire format

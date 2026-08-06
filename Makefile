@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 BIN_DIR ?= bin
 
-.PHONY: all build web-build test test-relay test-deploy race vet guards guard-check audit shen bifrost check clean install
+.PHONY: all build web-build test test-relay test-deploy race vet guards guard-check audit shen bifrost check clean install demo
 
 all: check build
 
@@ -41,6 +41,12 @@ audit:
 
 shen:
 	./scripts/shen-check.sh
+
+# One command to bring the whole local + controller demo up: PTY session,
+# controller (with automatic enrollment), agent, and the rich local web
+# gateway. Ctrl-C stops everything. See scripts/demo.sh --help for flags.
+demo:
+	./scripts/demo.sh $(DEMO_ARGS)
 
 bifrost:
 	./scripts/run-bifrost.sh
