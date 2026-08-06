@@ -21,6 +21,26 @@ type Secret struct {
 // Secrets is the parsed secrets.json file.
 type Secrets struct {
 	Secrets map[string]Secret `json:"secrets"`
+	// HostRedirects optionally forwards a MITM'd host to a local upstream
+	// (e.g. "api.anthropic.com" -> "http://127.0.0.1:8093"). Demo-only: it lets
+	// a fully-local mock stand in for a real provider so the interception path
+	// can be exercised without live credentials. Keyed by exact host.
+	HostRedirects map[string]string `json:"host_redirects,omitempty"`
+}
+
+// redirectFor returns the local (scheme, host) to forward an intercepted host
+// to, if a redirect is configured.
+func (s *Secrets) redirectFor(host string) (scheme, hostport string, ok bool) {
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	target, found := s.HostRedirects[host]
+	if !found {
+		return "", "", false
+	}
+	target = strings.TrimSpace(target)
+	if strings.HasPrefix(target, "https://") {
+		return "https", strings.TrimPrefix(target, "https://"), true
+	}
+	return "http", strings.TrimPrefix(target, "http://"), true
 }
 
 // LoadSecrets reads and parses a secrets.json file.

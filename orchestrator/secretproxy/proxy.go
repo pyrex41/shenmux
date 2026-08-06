@@ -224,6 +224,14 @@ func (p *proxyHandler) tlsMITM(clientConn net.Conn, host, hostPort string) {
 		req.URL.Host = hostPort
 		req.RequestURI = ""
 
+		// Demo host-redirect: forward this intercepted host to a local upstream
+		// (secret injection still happens below, against the original host).
+		if sc, hp, ok := p.secrets.redirectFor(host); ok {
+			req.URL.Scheme = sc
+			req.URL.Host = hp
+			req.Host = "" // use URL.Host for the outbound Host header
+		}
+
 		// Buffer the body so the transport can rewind on a retried connection.
 		if req.Body != nil {
 			bodyBytes, readErr := io.ReadAll(io.LimitReader(req.Body, maxRequestBody))

@@ -54,7 +54,7 @@ func TestDefaultSecretsGeneration(t *testing.T) {
 	if entry.Value != "sk-REAL-demo-alpha-key" {
 		t.Errorf("value = %q, want sk-REAL-demo-alpha-key", entry.Value)
 	}
-	wantHosts := []string{"127.0.0.1", "localhost", ".anthropic.com"}
+	wantHosts := []string{"127.0.0.1", "localhost", "api.anthropic.com", ".anthropic.com"}
 	if !reflect.DeepEqual(entry.AllowedHosts, wantHosts) {
 		t.Errorf("allowed_hosts = %v, want %v", entry.AllowedHosts, wantHosts)
 	}

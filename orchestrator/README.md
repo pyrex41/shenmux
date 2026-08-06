@@ -84,6 +84,27 @@ checkpoint/fork, and the event stream. **Simulated**: pods → processes, OpenBa
 → inline `value`, and Karpenter/Crossplane are not exercised. The full table is
 in [`demo/README.md`](demo/README.md).
 
+## Real harness: pi
+
+[`demo/pi-demo.sh`](demo/pi-demo.sh) runs the same machinery with a **real
+coding agent** — [pi](https://github.com/earendil-works/pi) — instead of the
+mock (transcript: [`demo/EXAMPLE-OUTPUT-pi.txt`](demo/EXAMPLE-OUTPUT-pi.txt)):
+
+```
+./demo/pi-demo.sh      # installs pi via npm if missing; SKIPs cleanly if it can't
+```
+
+`muxwork spawn --harness pi` launches the real `pi` binary headless
+(`pi --offline --provider anthropic -p …`) inside a shenmux PTY, with its
+Anthropic API egress routed through the worker's secret-proxy. pi holds only a
+placeholder key; the proxy swaps in the real per-worker value and only for the
+allow-listed host. A local `bin/anthropic-mock` stands in for the model (via the
+proxy's `host_redirects`) so pi completes a real streaming turn without live
+credentials, and records the credential it received — the swapped **real**
+value, proving pi never handled it. The pi worker is then checkpointed and
+forked, and a content-addressed `snapshot diff` shows pi's own session state
+diverging between the fork and its parent.
+
 ## Layout
 
 ```

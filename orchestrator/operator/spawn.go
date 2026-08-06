@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 )
 
@@ -26,7 +27,8 @@ type SpawnConfig struct {
 
 // harnessCommand maps a harness name to an argv. mock -> bin/mock-agent; known
 // CLIs are used if on PATH, else fall back to mock with a warning line.
-func harnessCommand(name string) (argv []string, warning string, err error) {
+func harnessCommand(cfg SpawnConfig) (argv []string, warning string, err error) {
+	name := cfg.Harness
 	switch name {
 	case "", "mock":
 		bin := ResolveBin("mock-agent")
@@ -34,15 +36,25 @@ func harnessCommand(name string) (argv []string, warning string, err error) {
 			return nil, "", fmt.Errorf("mock-agent binary not found (looked in $MUXWORK_BIN, exe dir, ./bin, PATH)")
 		}
 		return []string{bin}, "", nil
-	case "codex", "pi", "opencode":
+	case "pi":
+		// Real pi coding agent, headless: one-shot prompt then exit. Its API
+		// egress is intercepted by the worker's secret-proxy; the model is a
+		// local mock via host_redirects (see DefaultSecrets).
+		if p, lookErr := exec.LookPath("pi"); lookErr == nil {
+			model := orDefault(os.Getenv("MUXWORK_PI_MODEL"), "anthropic/claude-3-5-sonnet-20241022")
+			prompt := orDefault(cfg.Prompt, "Reply with a one-line confirmation that you are running.")
+			// Store pi's session inside the workspace so its conversation is part
+			// of the checkpoint (resumable/forkable), not off in $HOME.
+			sessionDir := filepath.Join(NewWorker(cfg.State, cfg.Name).Workspace(), ".pi-sessions")
+			return []string{p, "--offline", "--provider", "anthropic", "--model", model,
+				"--no-approve", "--session-dir", sessionDir, "-p", prompt}, "", nil
+		}
+		return piFallback(name)
+	case "codex", "opencode":
 		if p, lookErr := exec.LookPath(name); lookErr == nil {
 			return []string{p}, "", nil
 		}
-		bin := ResolveBin("mock-agent")
-		if bin == "" {
-			return nil, "", fmt.Errorf("%s not on PATH and mock-agent fallback not found", name)
-		}
-		return []string{bin}, fmt.Sprintf("harness %q not on PATH; falling back to mock-agent", name), nil
+		return piFallback(name)
 	default:
 		bin := ResolveBin("mock-agent")
 		if bin == "" {
@@ -50,6 +62,15 @@ func harnessCommand(name string) (argv []string, warning string, err error) {
 		}
 		return []string{bin}, fmt.Sprintf("unknown harness %q; falling back to mock-agent", name), nil
 	}
+}
+
+// piFallback returns the mock-agent when a named CLI harness is not installed.
+func piFallback(name string) (argv []string, warning string, err error) {
+	bin := ResolveBin("mock-agent")
+	if bin == "" {
+		return nil, "", fmt.Errorf("%s not on PATH and mock-agent fallback not found", name)
+	}
+	return []string{bin}, fmt.Sprintf("harness %q not on PATH; falling back to mock-agent", name), nil
 }
 
 // childEnv builds the environment for the worker harness: proxy pointing at the
@@ -71,6 +92,10 @@ func childEnv(w Worker, cfg SpawnConfig, proxyPort int) []string {
 		"HTTP_PROXY=" + proxyURL,
 		"https_proxy=" + proxyURL,
 		"http_proxy=" + proxyURL,
+		// Node/undici clients (pi) route via global-agent, not bare HTTPS_PROXY.
+		// Env is set explicitly (no inheritance), so NO_PROXY is absent and the
+		// api.anthropic.com call is NOT bypassed — it goes through the proxy.
+		"GLOBAL_AGENT_HTTPS_PROXY=" + proxyURL,
 		"ANTHROPIC_API_KEY=" + PlaceholderKey,
 		"WORKSPACE=" + w.Workspace(),
 		"HOME=" + w.Home(),
@@ -113,7 +138,7 @@ func launchWorker(w Worker, cfg SpawnConfig) (*launchOutcome, error) {
 		oc.steps = append(oc.steps, fmt.Sprintf(format, a...))
 	}
 
-	harnessArgv, warn, err := harnessCommand(cfg.Harness)
+	harnessArgv, warn, err := harnessCommand(cfg)
 	if err != nil {
 		return oc, err
 	}

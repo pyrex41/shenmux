@@ -54,6 +54,10 @@ type SecretSpec struct {
 // SecretsFile is the top-level secrets.json document.
 type SecretsFile struct {
 	Secrets map[string]SecretSpec `json:"secrets"`
+	// HostRedirects optionally forwards a MITM'd host to a local upstream
+	// (demo-only), letting a local mock stand in for a real provider so real
+	// harnesses (e.g. pi) can complete a turn without live credentials.
+	HostRedirects map[string]string `json:"host_redirects,omitempty"`
 }
 
 // Status is the persisted status.json for a worker.
@@ -88,15 +92,23 @@ type Event struct {
 // ANTHROPIC_API_KEY whose placeholder the harness holds and whose real value
 // the proxy injects, allowed only for the loopback upstream and .anthropic.com.
 func DefaultSecrets(name string) SecretsFile {
-	return SecretsFile{
+	sf := SecretsFile{
 		Secrets: map[string]SecretSpec{
 			"ANTHROPIC_API_KEY": {
 				Placeholder:  PlaceholderKey,
 				Value:        "sk-REAL-demo-" + name + "-key",
-				AllowedHosts: []string{"127.0.0.1", "localhost", ".anthropic.com"},
+				AllowedHosts: []string{"127.0.0.1", "localhost", "api.anthropic.com", ".anthropic.com"},
 			},
 		},
 	}
+	// For real harnesses (e.g. pi) that call api.anthropic.com, redirect that
+	// host to a local Anthropic-API mock so the turn completes without live
+	// credentials, while the proxy still swaps the placeholder for the real
+	// value en route. Set by the pi demo.
+	if r := os.Getenv("MUXWORK_ANTHROPIC_REDIRECT"); r != "" {
+		sf.HostRedirects = map[string]string{"api.anthropic.com": r}
+	}
+	return sf
 }
 
 // PlaceholderKey is the fake token the harness sees; the proxy swaps it for the

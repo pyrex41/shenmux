@@ -1,0 +1,55 @@
+== 0. PREFLIGHT ==
+   pi version: 0.83.0
+   building orchestrator cmds ...
+   PASS bin/anthropic-mock built
+   PASS bin/secret-proxy built
+   PASS bin/snapshot built
+   PASS bin/muxwork built
+== 1. LOCAL ANTHROPIC MOCK ==
+   PASS anthropic-mock listening on 127.0.0.1:8193
+   worker secret-proxies will redirect api.anthropic.com -> 127.0.0.1:8193 (swap still applied)
+== 2. REAL pi WORKER (shenmux PTY + secret-proxy + pi) ==
+   spawning pi worker 'pi-base' ...
+spawned worker "pi-base": phase=Running backend=shenmux pid=15278 proxy_port=33503
+   waiting for pi to complete its turn (real node startup + streamed response) ...
+   PASS pi-base completed a turn (mock reply persisted to its session)
+   pi-base status: { "name": "pi-base", "harness": "pi", "phase": "Running", "pid": 15278, "proxy_pid": 15270, "proxy_port": 33503, "session_backend": "shenmux", "created_at": 178
+== 3. CREDENTIAL INTERCEPTION (real pi) ==
+   what the mock (upstream) received as the API credential:
+      sk-REAL-demo-pi-base-key
+   PASS proxy log shows the swap for api.anthropic.com
+   PASS upstream received the REAL per-worker value (swap happened)
+   PASS upstream did NOT receive the placeholder
+   pi itself only ever held ANTHROPIC_API_KEY=sk-placeholder-anthropic (operator-injected).
+== 4. CHECKPOINT + FORK a real pi worker ==
+   suspending pi-base (checkpoints its workspace incl. pi session) ...
+suspended worker "pi-base": checkpoint=/tmp/tmp.S5TB5I8bNn/workers/pi-base/manifests/20260806T045516Z.sexpr
+   PASS pi-base has a checkpoint manifest
+   forking pi-base -> pi-fork with a DIFFERENT prompt ...
+forked "pi-fork" from "pi-base": phase=Running backend=shenmux pid=15721
+   waiting for pi-fork to run its own turn ...
+   PASS pi-fork's session diverged from pi-base
+   checkpointing pi-fork and diffing trees vs pi-base ...
+   snapshot diff pi-base <-> pi-fork:
+       + .pi-sessions/2026-08-06T04-55-20-137Z_019fd56d-0749-7dea-a0b3-edd9b956cd5a.jsonl
+   PASS snapshot diff shows the pi session tree changed
+== 5. FLEET VIEW + EVENT STREAM ==
+   muxwork list:
+       NAME     HARNESS  PHASE      BACKEND  PID  PROXY_PORT  PARENT
+       pi-base  pi       Suspended  shenmux  0    33503       -
+       pi-fork  pi       Suspended  shenmux  0    43003       pi-base
+   events (muxwork watch --json, first lines):
+       {"ts":1785992114,"worker":"pi-base","event":"spawned","detail":{"harness":"pi","parent":"","proxy_port":33503,"session_backend":"shenmux"}}
+       {"ts":1785992114,"worker":"pi-base","event":"running","detail":{"pid":15278}}
+       {"ts":1785992116,"worker":"pi-base","event":"checkpointed","detail":"/tmp/tmp.S5TB5I8bNn/workers/pi-base/manifests/20260806T045516Z.sexpr"}
+       {"ts":1785992119,"worker":"pi-base","event":"suspended","detail":"/tmp/tmp.S5TB5I8bNn/workers/pi-base/manifests/20260806T045516Z.sexpr"}
+       {"ts":1785992119,"worker":"pi-fork","event":"spawned","detail":{"harness":"pi","parent":"pi-base","proxy_port":43003,"session_backend":"shenmux"}}
+       {"ts":1785992119,"worker":"pi-fork","event":"running","detail":{"pid":15721}}
+       {"ts":1785992119,"worker":"pi-fork","event":"forked","detail":{"from":"pi-base","src_manifest":"/tmp/tmp.S5TB5I8bNn/workers/pi-base/manifests/20260806T045516Z.sexpr"}}
+       {"ts":1785992120,"worker":"pi-fork","event":"checkpointed","detail":"/tmp/tmp.S5TB5I8bNn/workers/pi-fork/manifests/20260806T045520Z.sexpr"}
+       {"ts":1785992124,"worker":"pi-fork","event":"suspended","detail":"/tmp/tmp.S5TB5I8bNn/workers/pi-fork/manifests/20260806T045520Z.sexpr"}
+
+========== pi DEMO OK ==========
+== CLEANUP ==
+   removed /tmp/tmp.S5TB5I8bNn
+PIDEMO_EXIT=0
