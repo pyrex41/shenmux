@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	muxclient "github.com/pyrex41/shenmux/client"
@@ -435,7 +436,38 @@ func (b *Bridge) closeAllStreams() {
 	}
 }
 
+// teardownCallTimeout bounds each best-effort control call made while a stream
+// is torn down. Teardown frequently runs because the tunnel already died, so
+// these calls must fail fast instead of parking the bridge on a dead peer.
+const teardownCallTimeout = time.Second
+
+// closeActive tears a relay stream down deterministically.
+//
+// The session daemon has to learn at teardown time that this relay client is
+// gone, otherwise the exclusive control lease stays parked on a client id that
+// nobody can reach. localClientID derives the local client id from the relay
+// stream id, so a browser that reconnects arrives as a *different* client and
+// can never displace the stale owner: every later client (the rich local web
+// UI, muxctl, anything) then fails AcquireControl with "session control is
+// owned by another client" until the agent process is restarted.
+//
+// So release the lease and detach before closing, in that order. Both calls are
+// best effort on their own short bounded context, and their errors are
+// deliberately ignored: when the tunnel is already dead they will simply fail,
+// and teardown must still complete. Releasing control this stream does not own
+// is harmless -- the Shen release-control-ok? rule rejects it with "no-control"
+// without mutating session state and without any daemon-side logging.
 func (b *Bridge) closeActive(active *stream) {
+	if active.client != nil {
+		// Never reuse the stream context here: it is cancelled just below and
+		// is usually cancelled already, which would abort both calls instantly.
+		releaseCtx, cancelRelease := context.WithTimeout(context.Background(), teardownCallTimeout)
+		_, _ = active.client.ReleaseControl(releaseCtx)
+		cancelRelease()
+		detachCtx, cancelDetach := context.WithTimeout(context.Background(), teardownCallTimeout)
+		_ = active.client.Detach(detachCtx)
+		cancelDetach()
+	}
 	if active.cancel != nil {
 		active.cancel()
 	}
