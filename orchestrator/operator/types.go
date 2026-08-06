@@ -58,19 +58,19 @@ type SecretsFile struct {
 
 // Status is the persisted status.json for a worker.
 type Status struct {
-	Name           string   `json:"name"`
-	Harness        string   `json:"harness"`
-	Phase          string   `json:"phase"`
-	PID            int      `json:"pid"`
-	ProxyPID       int      `json:"proxy_pid"`
-	ProxyPort      int      `json:"proxy_port"`
-	SessionBackend string   `json:"session_backend"`
-	CreatedAt      int64    `json:"created_at"`
-	LastCheckpoint string   `json:"last_checkpoint"`
-	CompletedAt    int64    `json:"completed_at,omitempty"`
-	Parent         string   `json:"parent"`
-	MockTarget     string   `json:"mock_target,omitempty"`
-	MockSteps      string   `json:"mock_steps,omitempty"`
+	Name           string `json:"name"`
+	Harness        string `json:"harness"`
+	Phase          string `json:"phase"`
+	PID            int    `json:"pid"`
+	ProxyPID       int    `json:"proxy_pid"`
+	ProxyPort      int    `json:"proxy_port"`
+	SessionBackend string `json:"session_backend"`
+	CreatedAt      int64  `json:"created_at"`
+	LastCheckpoint string `json:"last_checkpoint"`
+	CompletedAt    int64  `json:"completed_at,omitempty"`
+	Parent         string `json:"parent"`
+	MockTarget     string `json:"mock_target,omitempty"`
+	MockSteps      string `json:"mock_steps,omitempty"`
 	// Steps records every spawn/resume step and which fallback path was used,
 	// per the spawn contract.
 	Steps []string `json:"steps,omitempty"`
