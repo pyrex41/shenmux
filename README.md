@@ -44,10 +44,11 @@ Or attach from a browser on the same machine:
 ./bin/shenmux web --session work      # --listen 127.0.0.1:8787 by default
 ```
 
-It prints a URL containing an access token. Open that, not the bare address: a
+It prints a URL containing an access token, e.g. `shenmux web
+url=http://127.0.0.1:8787/?token=...`. Open that, not the bare address: a
 loopback port is not an authorization boundary, so without a token any local
-process — or a browser tab left open from a previous run — can attach and take
-the input lease. `--no-token` opts out if you want the old behaviour.
+process can attach and take the input lease. `--no-token` opts out if you want
+that.
 
 `shenmux run` starts a login shell and restarts it when it exits. Pass a command
 after `--` for one shot, or `--keepalive=false`. `shenmux status` prints the
@@ -71,6 +72,12 @@ One client holds the input lease at a time. If another client has it, your
 "take control" request fails and you get a session you can watch but not type
 into. That is deliberate, not a bug. Detach the other client, or release control
 from it, and try again.
+
+A browser tab left open from an earlier `shenmux web` process cannot reattach
+and grab the lease out from under you: every gateway process stamps an
+instance id into the page it serves and refuses a handshake carrying a
+different one. The stale tab gets a plain "reload the page" error instead of
+silently attaching.
 
 ## Remote through a controller
 
@@ -96,19 +103,22 @@ host that owns the PTY:
 Open <http://127.0.0.1:8788/workspace?subject=local-test> — and re-read the
 two-UIs warning above before you judge it.
 
-`shenmux login` overwrites your device identity. It writes `device_id` and the
-device keypair into `~/.local/state/shenmux/state.json`, replacing whatever was
-there, and there is no flag to stop it. If you already have an enrollment you
-care about, point the command somewhere else first:
+`shenmux login` refuses to enroll over an existing device identity: it names
+the device id at stake and stops rather than overwriting
+`~/.local/state/shenmux/state.json`. Point it at a separate state directory to
+enroll alongside what you already have:
 
 ```sh
-SHENMUX_STATE_DIR=/tmp/other-enrollment \
-SHENMUX_CONFIG_FILE=/tmp/other-enrollment/config.json \
-  ./bin/shenmux login --controller http://127.0.0.1:8788 --code CODE
+./bin/shenmux login --controller http://127.0.0.1:8788 --code CODE \
+  --state-dir /tmp/other-enrollment
 ```
 
-Those two environment variables are the only isolation available. `make demo`
-sets them for you.
+`--force` replaces the existing enrollment instead — this destroys its
+keypair, and the old device stays registered on the controller with nothing
+left here that can act as it. `SHENMUX_STATE_DIR` and `SHENMUX_CONFIG_FILE`
+do the same job as `--state-dir`/`--config`, but for every client command in a
+session at once, which is why `make demo` sets them rather than passing flags
+to each one.
 
 Across hosts, replace loopback with a reachable private address and keep
 `--origin` equal to the URL the agent uses. `shenmux login` allows plain HTTP
@@ -151,15 +161,26 @@ libghostty` swaps in the libghostty-vt terminal adapter and needs both.
 ## Tests
 
 ```sh
-nix develop --command make check   # web bundle, Shen guards + gate, go test, vet, both builds
+nix develop --command make check   # web bundle drift guard, JS tests, Shen guards + gate, go test, vet, both builds
 nix develop --command make race
 ```
+
+`internal/webui/app.bundle.js` is committed and embedded in the binary, so an
+edit to the client source that skips `npm run build` ships nothing. `make
+check` catches that drift instead of quietly fixing it for you.
 
 `make test-deploy` is a compile check, not a deployment test.
 
 ## More
 
+The Shen spec isn't a build-time check that disappears once code compiles:
+`internal/shenguard/guards_gen.go` calls the generated model at runtime
+(`semanticModel.Call`) for every session transition — attach, control, input,
+delivery — so it decides these outcomes as the session runs, not just checks
+them ahead of time.
+
 - [docs/WEB.md](docs/WEB.md) — both browser clients in detail, and the latency benchmark
+- [docs/WHAT-THE-SPEC-OWNS.md](docs/WHAT-THE-SPEC-OWNS.md) — what the spec owns, what was deliberately refused, and what remains Go's job
 - [docs/TRUST-MODEL.md](docs/TRUST-MODEL.md) — what is guaranteed, what is not
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — how run/web/agent/controller fit together
 - [docs/PROTOCOL.md](docs/PROTOCOL.md) — the wire format

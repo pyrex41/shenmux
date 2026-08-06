@@ -1,0 +1,185 @@
+# A runnable local trial of the controller + agent-sidecar shape, for k3s/k3d.
+#
+# The sibling files in this directory sketch a production deployment and cannot
+# be applied as-is: they assume TLS, an ingress, a real origin, and a published
+# image. This one runs on a laptop cluster so the shape can actually be tried.
+#
+# What it is NOT: this turns on --dev-browser-subject, which trusts an
+# X-Shenmux-Subject header and is deliberately insecure. Plain HTTP throughout.
+# Private cluster only.
+#
+#   docker build -t shenmux:local .
+#   k3d cluster create shenmux --agents 1 --port "18788:30788@server:0"
+#   k3d image import shenmux:local -c shenmux
+#   kubectl apply -f deploy/kubernetes/local-trial.yaml
+#   # then enroll the agent, which needs a code from the controller:
+#   kubectl -n shenmux create secret generic shenmux-enrollment \
+#     --from-literal=code="$(kubectl -n shenmux logs deploy/shenmux-controller \
+#       | sed -n 's/.*enrollment_codes=\([^ ]*\).*/\1/p' | head -1)"
+#   kubectl -n shenmux rollout restart deploy/shenmux-worker
+#   open http://127.0.0.1:18788/workspace?subject=local-test
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: shenmux
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shenmux-controller
+  namespace: shenmux
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: shenmux-controller }
+  template:
+    metadata:
+      labels: { app: shenmux-controller }
+    spec:
+      containers:
+        - name: controller
+          image: shenmux:local
+          imagePullPolicy: Never
+          command: ["/usr/local/bin/shenmux"]
+          args:
+            - controller
+            - --listen=0.0.0.0:8788
+            # --origin is NOT a CORS setting. It is signed into the agent's
+            # enrollment challenge (relay.SignChallenge) and verified against
+            # this value (relay.VerifyChallenge), so it must equal the URL the
+            # AGENT dials -- the in-cluster service name, not the address the
+            # browser uses. Get it wrong and the handshake fails silently: the
+            # agent logs its startup line, the controller logs nothing, and
+            # /sessions stays empty. The browser is unaffected because the
+            # websocket upgrader accepts any origin.
+            - --origin=http://shenmux-controller.shenmux.svc.cluster.local:8788
+            - --dev-browser-subject=local-test
+            - --state-dir=/state
+          ports:
+            - { name: http, containerPort: 8788 }
+          volumeMounts:
+            - { name: state, mountPath: /state }
+      volumes:
+        - name: state
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shenmux-controller
+  namespace: shenmux
+spec:
+  type: NodePort
+  selector: { app: shenmux-controller }
+  ports:
+    - name: http
+      port: 8788
+      targetPort: http
+      nodePort: 30788
+---
+# One worker: a PTY owned by `shenmux run`, and an agent sidecar that dials the
+# controller outbound and bridges that session. They share the IPC sockets
+# through an emptyDir; nothing listens on a port in this pod.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shenmux-worker
+  namespace: shenmux
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: shenmux-worker }
+  template:
+    metadata:
+      labels: { app: shenmux-worker }
+    spec:
+      initContainers:
+        # The session daemon refuses to bind unless the IPC directory is owned
+        # by the effective uid with no group or other access. An emptyDir is
+        # mode 0755 by default, so tighten it before anything tries to bind.
+        - name: tighten-ipc
+          image: shenmux:local
+          imagePullPolicy: Never
+          command: ["/bin/sh", "-c", "chmod 0700 /ipc"]
+          volumeMounts:
+            - { name: ipc, mountPath: /ipc }
+      containers:
+        - name: session
+          image: shenmux:local
+          imagePullPolicy: Never
+          command: ["/usr/local/bin/shenmux"]
+          args:
+            - run
+            - --session=work
+            - --control=ipc:///ipc/work.ctl
+            - --data=ipc:///ipc/work.pub
+          volumeMounts:
+            - { name: ipc, mountPath: /ipc }
+        - name: web
+          image: shenmux:local
+          imagePullPolicy: Never
+          command: ["/usr/local/bin/shenmux"]
+          args:
+            - web
+            - --session=work
+            - --listen=0.0.0.0:8787
+            - --control=ipc:///ipc/work.ctl
+            - --data=ipc:///ipc/work.pub
+            # Fixed so the URL is predictable; the gateway generates one
+            # otherwise and it would change on every restart.
+            - --token=local-trial
+          ports:
+            - { name: web, containerPort: 8787 }
+          volumeMounts:
+            - { name: ipc, mountPath: /ipc }
+        - name: agent
+          image: shenmux:local
+          imagePullPolicy: Never
+          command: ["/usr/local/bin/shenmux"]
+          args:
+            - agent
+            - --controller=http://shenmux-controller.shenmux.svc.cluster.local:8788
+            - --transport=relay
+            - --session=work
+            - --control=ipc:///ipc/work.ctl
+            - --data=ipc:///ipc/work.pub
+            - --state-dir=/state
+            - --harness=k8s-trial
+          env:
+            # Empty until the enrollment secret exists; the agent needs a code
+            # on first startup only, and the controller has to be running to
+            # print one. See the header comment.
+            - name: SHENMUX_ENROLLMENT_CODE
+              valueFrom:
+                secretKeyRef:
+                  name: shenmux-enrollment
+                  key: code
+                  optional: true
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef: { fieldPath: metadata.namespace }
+            - name: SHENMUX_WORKLOAD
+              value: shenmux-worker
+          volumeMounts:
+            - { name: ipc, mountPath: /ipc }
+            - { name: state, mountPath: /state }
+      volumes:
+        - name: ipc
+          emptyDir: {}
+        - name: state
+          emptyDir: {}
+---
+# The real browser terminal, served from inside the worker pod. Reach it with:
+#   kubectl -n shenmux port-forward svc/shenmux-web 8787:8787
+#   open 'http://127.0.0.1:8787/?token=local-trial'
+apiVersion: v1
+kind: Service
+metadata:
+  name: shenmux-web
+  namespace: shenmux
+spec:
+  selector: { app: shenmux-worker }
+  ports:
+    - name: web
+      port: 8787
+      targetPort: web

@@ -267,3 +267,49 @@ be torn down and the client must leave the session's client list.
 
 Found while extending the spec: no reducer rule can reach this, because the
 session model never learns the stream existed. See `docs/WHAT-THE-SPEC-OWNS.md`.
+
+---
+
+## 7. We may be on the wrong ZeroMQ driver
+
+**Severity: worth a spike before more patching.**
+
+`pyrex41/shen-extensions` ships a ZeroMQ surface written once in Shen
+(`shen/x/zmq.shen`) over a ten-primitive host waist, and its **shen-go backend
+is shipped** — bound to `github.com/go-zeromq/zmq4`, which is a *different*
+driver from the `github.com/tomi77/zmq4` this repo uses.
+
+That matters because of one line. `go-zeromq/zmq4`'s router (`router.go:37`):
+
+```go
+func (router *routerSocket) Send(msg Msg) error {
+	ctx, cancel := context.WithTimeout(router.sck.ctx, router.sck.Timeout())
+	defer cancel()
+	return router.sck.w.write(ctx, msg)
+}
+```
+
+It derives a real deadline from a settable `WithTimeout` option. Our driver's
+`ROUTER.Send` takes a context and discards it, which is the root of gap 1, of
+`server.boundedSender`, and of the patch in `patches/`. A driver that honours a
+send deadline retires that whole line of work rather than working around it.
+
+**Do not switch on this basis alone.** Verify first:
+
+- **Option coverage.** shenmux sets `SndHWM`/`RcvHWM` to 10_000 and
+  `MaxMsgSize`. The Shen waist exposes only `rcvtimeo`, `sndtimeo`, `subscribe`,
+  `unsubscribe`, `linger`, so going through `shen.x.zmq` would lose the HWMs.
+  Going directly to `go-zeromq/zmq4` may not; check its `SetOption` surface.
+- **Allocation bound.** Gap 5 is unfixable on the current driver. Does this one
+  bound a frame before reading it?
+- **ROUTER identity semantics.** Our control plane depends on the identity frame
+  and on `ErrNoRoute`-style per-peer failures being distinguishable from a dead
+  socket. Confirm the equivalent exists.
+- **Cost.** The data path is PTY deltas at high frequency. Routing that through
+  the Shen waist adds a Shen call per message, which is a different proposition
+  from calling the Go library directly. Measure before assuming.
+
+Two separable questions, and they should be decided separately: *which driver*
+(a contained dependency swap, and the one with the evidence behind it), and
+*whether socket I/O should go through Shen at all* (an architecture change whose
+cost is on the hot path). The first can be answered without the second.
