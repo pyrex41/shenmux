@@ -170,7 +170,7 @@ func cmdSpawn(state string, args []string, out, errOut io.Writer) error {
 	_ = *checkpoint // documented flag; snapshot restore-from-manifest is out of demo scope
 
 	if *from != "" {
-		st, err := operator.Fork(state, *name, *from, *prompt)
+		st, err := operator.Fork(state, *name, *from, *prompt, *mockTarget, *mockSteps)
 		if err != nil {
 			return err
 		}
@@ -231,13 +231,15 @@ func cmdFork(state string, args []string, out, errOut io.Writer) error {
 	name := fs.String("name", "", "new worker name (required)")
 	from := fs.String("from", "", "source worker to fork (required)")
 	prompt := fs.String("prompt", "", "optional prompt for the new worker")
+	mockTarget := fs.String("mock-target", "", "override MOCK_TARGET for the fork (inherits source if empty)")
+	mockSteps := fs.String("mock-steps", "", "override MOCK_STEPS for the fork (inherits source if empty)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *name == "" || *from == "" {
 		return fmt.Errorf("fork: --name and --from are required")
 	}
-	st, err := operator.Fork(state, *name, *from, *prompt)
+	st, err := operator.Fork(state, *name, *from, *prompt, *mockTarget, *mockSteps)
 	if err != nil {
 		return err
 	}

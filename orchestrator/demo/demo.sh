@@ -146,9 +146,11 @@ section "1. MOCK UPSTREAM"
 # and keep the first that binds, so the demo is robust to its exact CLI.
 start_upstream() {
   local -a attempts=(
+    "$BIN/mock-upstream --http $UPSTREAM_ADDR"
+    "$BIN/mock-upstream -http $UPSTREAM_ADDR"
     "$BIN/mock-upstream --listen $UPSTREAM_ADDR"
     "$BIN/mock-upstream --addr $UPSTREAM_ADDR"
-    "$BIN/mock-upstream --listen 127.0.0.1:$UPSTREAM_PORT"
+    "$BIN/mock-upstream --http 127.0.0.1:$UPSTREAM_PORT"
     "$BIN/mock-upstream $UPSTREAM_ADDR"
   )
   local envform="MOCK_UPSTREAM_ADDR=$UPSTREAM_ADDR $BIN/mock-upstream"
@@ -240,10 +242,10 @@ sed 's/^/       /' "$PROXY_LOG" 2>/dev/null | grep -E 'replaced|blocked' || say 
 section "3. BASE WORKER (shenmux PTY + proxy + mock harness)"
 say "spawning worker 'base' (harness=mock, 3 steps) pointed at the upstream ..."
 # The operator (muxwork) sets up the worker's own secret-proxy + shenmux run
-# wrapper; we pass the harness's target/real key through the environment.
-env MOCK_TARGET="$ALLOWED_URL" ANTHROPIC_API_KEY="$PLACEHOLDER" \
-    MOCK_REAL_VALUE="$REAL_VALUE" \
-  muxwork spawn --name base --harness mock --steps 3 \
+# wrapper and injects the harness env (placeholder key, MOCK_TARGET, proxy)
+# itself; we only pass the target and step count as flags.
+muxwork spawn --name base --harness mock \
+    --mock-target "$ALLOWED_URL" --mock-steps 3 \
   || bad "muxwork spawn base"
 
 say "waiting for base to run its steps ..."
@@ -287,9 +289,8 @@ for approach in alpha beta gamma; do
   i=$((i+1))
   steps=$((i+1))   # 2, 3, 4 -> progress.txt diverges too
   say "forking base -> $approach ($steps steps) ..."
-  env MOCK_TARGET="$ALLOWED_URL" ANTHROPIC_API_KEY="$PLACEHOLDER" \
-      MOCK_REAL_VALUE="$REAL_VALUE" WORKER="$approach" \
-    muxwork fork --name "$approach" --from base --steps "$steps" \
+  muxwork fork --name "$approach" --from base \
+      --mock-target "$ALLOWED_URL" --mock-steps "$steps" \
     || bad "muxwork fork $approach"
 done
 

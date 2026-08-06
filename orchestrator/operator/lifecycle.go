@@ -117,7 +117,9 @@ func Resume(state, name string) (*Status, error) {
 
 // Fork creates a new worker whose workspace is an O(delta) restore of SRC's
 // latest checkpoint, then spawns it. If SRC is running it is checkpointed first.
-func Fork(state, newName, srcName, prompt string) (*Status, error) {
+// mockTarget/mockSteps override the source's harness settings when non-empty,
+// so forks can diverge (e.g. different step counts). Empty inherits from SRC.
+func Fork(state, newName, srcName, prompt, mockTarget, mockSteps string) (*Status, error) {
 	if newName == "" || srcName == "" {
 		return nil, fmt.Errorf("fork requires --name and --from")
 	}
@@ -182,8 +184,8 @@ func Fork(state, newName, srcName, prompt string) (*Status, error) {
 		Harness:    srcSt.Harness,
 		Prompt:     prompt,
 		Parent:     srcName,
-		MockTarget: srcSt.MockTarget,
-		MockSteps:  srcSt.MockSteps,
+		MockTarget: orDefault(mockTarget, srcSt.MockTarget),
+		MockSteps:  orDefault(mockSteps, srcSt.MockSteps),
 	})
 	if err != nil {
 		return st, err
