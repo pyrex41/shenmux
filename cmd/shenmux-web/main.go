@@ -18,6 +18,7 @@ func main() {
 	listen := flag.String("listen", ":8787", "HTTP listen address")
 	control := flag.String("control", "", "muxd control endpoint")
 	data := flag.String("data", "", "muxd data endpoint")
+	historyDir := flag.String("history-dir", "", "durable session history directory (optional)")
 	flag.Parse()
 	controlDefault, dataDefault, err := naming.DefaultEndpoints(*session)
 	if err != nil {
@@ -34,6 +35,7 @@ func main() {
 	defer stop()
 	srv := &http.Server{Addr: *listen, Handler: webgateway.New(ctx, webgateway.Config{
 		Session: *session, ControlEndpoint: *control, DataEndpoint: *data,
+		HistoryDir: *historyDir,
 	}).Handler()}
 	go func() {
 		<-ctx.Done()

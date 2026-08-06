@@ -4,16 +4,19 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/pyrex41/shenmux/client"
+	"github.com/pyrex41/shenmux/internal/history"
 	"github.com/pyrex41/shenmux/internal/protocol"
 	"github.com/pyrex41/shenmux/internal/webui"
 )
@@ -26,6 +29,7 @@ type Config struct {
 	Session         string
 	ControlEndpoint string
 	DataEndpoint    string
+	HistoryDir      string
 }
 
 type Server struct {
@@ -73,9 +77,42 @@ func (s *Server) Handler() http.Handler {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ok\n"))
 	})
+	mux.HandleFunc("/api/history", s.handleHistory)
 	mux.HandleFunc("/ws", s.handleWebSocket)
 	mux.Handle("/", muxHandler)
 	return mux
+}
+
+func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.cfg.HistoryDir == "" {
+		http.Error(w, "history is not configured", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if session := r.URL.Query().Get("session"); session != "" {
+		record, err := history.Load(s.cfg.HistoryDir, session)
+		if os.IsNotExist(err) {
+			http.Error(w, "history not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			http.Error(w, "invalid history", http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(record)
+		return
+	}
+	records, err := history.List(s.cfg.HistoryDir)
+	if err != nil {
+		http.Error(w, "unable to list history", http.StatusInternalServerError)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(records)
 }
 
 type command struct {

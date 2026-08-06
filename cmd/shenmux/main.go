@@ -464,6 +464,7 @@ func runWeb(ctx context.Context, args []string, _ io.Writer, stderr io.Writer) e
 	listen := flags.String("listen", "127.0.0.1:8787", "HTTP listen address")
 	control := flags.String("control", "", "muxd control endpoint")
 	data := flags.String("data", "", "muxd data endpoint")
+	historyDir := flags.String("history-dir", "", "durable session history directory (optional)")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -484,7 +485,7 @@ func runWeb(ctx context.Context, args []string, _ io.Writer, stderr io.Writer) e
 		*data = dataDefault
 	}
 	server := &http.Server{Addr: *listen, Handler: webgateway.New(ctx, webgateway.Config{
-		Session: *session, ControlEndpoint: *control, DataEndpoint: *data,
+		Session: *session, ControlEndpoint: *control, DataEndpoint: *data, HistoryDir: *historyDir,
 	}).Handler()}
 	go func() {
 		<-ctx.Done()
