@@ -169,9 +169,16 @@ func parseEntries(v sexpr) []Entry {
 		}
 		e := Entry{}
 		fields := item.list[1:]
-		for i := 0; i+1 < len(fields); i += 2 {
+		// The path is the first positional string after :file; the remaining
+		// fields are a :keyword value plist.
+		start := 0
+		if len(fields) > 0 && fields[0].isStr {
+			e.Path = fields[0].str
+			start = 1
+		}
+		for i := start; i+1 < len(fields); i += 2 {
 			switch fields[i].sym {
-			case ":path": // tolerate an explicit :path key
+			case ":path":
 				e.Path = fields[i+1].str
 			case ":hash":
 				e.Hash = fields[i+1].str
@@ -182,10 +189,6 @@ func parseEntries(v sexpr) []Entry {
 			case ":mtime":
 				e.Mtime = atoi64Or(fields[i+1].sym, 0)
 			}
-		}
-		// The path is the first positional string after :file.
-		if e.Path == "" && len(fields) > 0 && fields[0].isStr {
-			e.Path = fields[0].str
 		}
 		out = append(out, e)
 	}
