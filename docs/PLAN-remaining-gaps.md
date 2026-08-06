@@ -304,49 +304,61 @@ session model never learns the stream existed. See `docs/WHAT-THE-SPEC-OWNS.md`.
 
 ---
 
-## 7. Should we move to go-zeromq/zmq4? DECIDED: no.
+## 7. Should we move to go-zeromq/zmq4? DECIDED: not now, on memory -- not on routing.
 
-`pyrex41/shen-extensions` ships a ZeroMQ surface in Shen over a ten-primitive
-host waist, and its shen-go backend binds `github.com/go-zeromq/zmq4` — a
-different driver from the `tomi77/zmq4` here. It looked promising for one
-reason and was rejected for a worse one.
+**Corrected.** An earlier version of this section called the silent drop
+"disqualifying". That was wrong, and the correction matters because it changes
+what the blocker actually is.
 
-**The attraction was real.** `go-zeromq/zmq4`'s router derives a genuine
-deadline from a settable option (`router.go:37`), where ours takes a context and
-discards it. That single line is the root of gap 1, of `server.boundedSender`,
-and of the patch in `patches/`.
+**The silent drop is ZeroMQ's documented default, not a defect.** `zmq_socket(3)`:
+if a ROUTER's peer "does not exist anymore, or has never existed, the message
+shall be silently discarded", unless `ZMQ_ROUTER_MANDATORY` is set, in which
+case it fails with `EHOSTUNREACH`. Same at the high-water mark: drop by default,
+block or error under mandatory. The rationale is sound -- ROUTER serves many
+transient peers, and erroring by default would let one departed peer
+head-of-line-block everyone else. libzmq behaves identically unless you opt in.
+`go-zeromq/zmq4` implements the default faithfully and omits the opt-out: an
+incompleteness, not a spec violation.
 
-**The disqualifier: it cannot report a per-peer delivery failure at all.**
-`routerMWriter.write` (`router.go:226`) walks its connections, skips every one
-whose identity does not match, and if none match the loop body simply never
-runs — `grp.Wait()` returns nil and **the message is silently discarded**. That
-is libzmq's default ROUTER behaviour, and there is no `ROUTER_MANDATORY`
-equivalent to turn it off (no match for "mandatory" anywhere in the package).
+**And `EHOSTUNREACH` was never the guarantee I treated it as.** It reflects the
+ROUTER's *local view* only: an identity is routable from the moment a peer's
+connection registers until its disconnect is noticed, so a peer that is wedged
+but still connected queues fine and reports success. The ZeroMQ architecture is
+explicit that the transport guarantees atomicity and per-connection ordering,
+never delivery; reliability belongs above the socket, in acks and heartbeats.
 
-We would lose `ErrNoRoute`, and with it the distinction the control plane is now
-built on. `peerGone` would never fire, so `dropClient` would never run, so a
-departed client's control lease would never be released on the failure path —
-the exact wedge, returned in a form we could no longer even observe, because
-the send would report success.
+**We already built that.** The reducer now carries ownership-with-an-age: a
+lease held by a client that has stopped proving liveness expires on its own.
+That is the application-layer mechanism the guide prescribes, and it -- not
+`ErrNoRoute` -- is what makes lease release correct. `ErrNoRoute` is a fast
+local hint that lets us release early.
 
-Two further gaps, smaller but pointing the same way:
+**So the hint is replaceable at our layer.** The session model already knows who
+is attached (`mux.member?`), so a membership check before sending gives exactly
+the same local-view signal `EHOSTUNREACH` would, without needing the driver to
+provide it. If we ever switch, that is the substitute.
 
-- **No HWM for ROUTER.** `socket.SetOption` is `sck.props[name] = value; return
-  nil` under a `FIXME(sbinet) different socket types support different options`.
-  Only PUB reads `OptionHWM`. Setting the 10_000 HWMs this repo relies on would
-  return nil and do nothing — the accept-and-ignore trap we just spent a day
-  removing from `zmqx`.
-- **No frame bound either.** Nothing caps a frame body before it is read, so
-  gap 5 would not be fixed by switching; it would just move.
+**The real blocker is memory.** `socket.SetOption` is `props[name] = value;
+return nil` under a `FIXME(sbinet) different socket types support different
+options`, and `OptionHWM` is read only by `pub.go`. ROUTER has no high-water
+mark at all, so the 10_000 HWMs this control plane sets would silently do
+nothing and per-peer queues would grow unbounded. That is a genuine regression
+with no workaround at our layer, and it is the reason to stay put.
 
-**Decision: stay on `tomi77/zmq4`.** A driver that silently drops is worse for
-this control plane than one that blocks, because blocking is observable and we
-have bounded it. `server.boundedSender` is the right response and stays. The
-patch in `patches/` remains the upstream fix worth landing.
+**And the prize has shrunk.** The attraction was the send deadline, which
+`server.boundedSender` now provides. Switching would trade a bounded send we
+control for an unbounded queue we cannot.
 
-**Reopen this only if** `go-zeromq/zmq4` grows a mandatory-routing mode. The
-send-deadline advantage is genuine and would be worth revisiting the moment a
-per-peer failure becomes reportable.
+**Decision: stay on `tomi77/zmq4`.** Revisit if `go-zeromq/zmq4` gains ROUTER
+HWM; mandatory routing would be welcome but is no longer the deciding factor.
+
+**A constructive note for `shen-extensions`:** its waist could carry
+`router-mandatory` as an int socket option, with libzmq-backed ports
+implementing it natively and the pure-Go shen-go backend taking the existing
+"unsupported on this backend" escape hatch until upstream grows it. That keeps
+the contract honest per port, and tells ROUTER users on shen-go that they are
+in fire-and-forget mode -- which is the same honesty this repo just applied to
+`SndTimeout`.
 
 **Separately, and still open as a question rather than a gap:** whether socket
 I/O should route through the Shen waist at all. That is an architecture
