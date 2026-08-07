@@ -45,7 +45,7 @@ test:
 	go test ./...
 
 test-relay:
-	go test ./internal/relay ./internal/policy ./internal/appstate ./internal/transport ./internal/update ./cmd/shenmux
+	go test ./internal/relay ./internal/policy ./internal/appstate ./internal/transport ./cmd/shenmux
 
 test-deploy:
 	CGO_ENABLED=0 go build ./cmd/shenmux ./cmd/muxd ./cmd/muxctl ./cmd/shenmux-web
