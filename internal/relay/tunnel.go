@@ -242,8 +242,8 @@ type Controller struct {
 	CapabilityTTL       time.Duration
 	ControlLeaseTTL     time.Duration
 	AuthenticateBrowser func(*http.Request) (string, error)
-	// DevBrowserSubject enables the local workspace UI to authenticate a
-	// browser WebSocket, whose API cannot set arbitrary HTTP headers. Keep empty
+	// DevBrowserSubject lets a browser WebSocket, whose API cannot set
+	// arbitrary HTTP headers, authenticate from a query parameter. Keep empty
 	// in hosted deployments and provide real AuthenticateBrowser integration.
 	DevBrowserSubject string
 	mu                sync.Mutex
@@ -301,30 +301,6 @@ func (c *Controller) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
-	case "/workspace":
-		if r.Method != http.MethodGet {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		data, err := workspaceAssets.ReadFile("workspace.html")
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(data)
-	case "/workspace.js":
-		if r.Method != http.MethodGet {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		data, err := workspaceAssets.ReadFile("workspace.js")
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-		_, _ = w.Write(data)
 	case "/enroll":
 		c.handleEnroll(w, r)
 	case "/ws":
@@ -926,13 +902,9 @@ func (c *Controller) handleSessions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
-	namespace, workload := r.URL.Query().Get("namespace"), r.URL.Query().Get("workload")
 	c.mu.Lock()
 	result := make([]DiscoveredSession, 0)
 	for deviceID, agent := range c.agents {
-		if namespace != "" && agent.metadata.Namespace != namespace || workload != "" && agent.metadata.Workload != workload {
-			continue
-		}
 		for _, session := range agent.metadata.Sessions {
 			result = append(result, DiscoveredSession{DeviceID: deviceID, Online: true, ConnectedAt: agent.connectedAt, Metadata: agent.metadata, Session: session})
 		}

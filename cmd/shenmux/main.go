@@ -592,14 +592,9 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 	reconnectMaximum := flags.Duration("reconnect-maximum", 0, "maximum reconnect delay (persisted)")
 	reconnectFactor := flags.Float64("reconnect-factor", 0, "reconnect exponential factor (persisted)")
 	reconnectJitter := flags.Float64("reconnect-jitter", -1, "reconnect jitter fraction, 0 to 1 (persisted)")
-	cluster := flags.String("cluster", os.Getenv("SHENMUX_CLUSTER"), "Kubernetes cluster identity")
-	namespace := flags.String("namespace", firstEnv("SHENMUX_NAMESPACE", "POD_NAMESPACE"), "Kubernetes namespace")
-	workload := flags.String("workload", os.Getenv("SHENMUX_WORKLOAD"), "Kubernetes workload name")
-	pod := flags.String("pod", firstEnv("SHENMUX_POD", "POD_NAME"), "Kubernetes pod name")
-	node := flags.String("node", firstEnv("SHENMUX_NODE", "NODE_NAME"), "Kubernetes node name")
-	harness := flags.String("harness", os.Getenv("SHENMUX_HARNESS"), "agent harness name (codex, claude, pi, or custom)")
-	orchestrator := flags.Bool("orchestrator", false, "mark this agent as an orchestrator")
-	session := flags.String("session", os.Getenv("SHENMUX_SESSION"), "discoverable PTY/harness session name")
+	labels := labelFlag{}
+	flags.Var(labels, "label", "opaque key=value label advertised to the controller, repeatable")
+	session := flags.String("session", os.Getenv("SHENMUX_SESSION"), "discoverable PTY session name")
 	sessions := flags.String("sessions", os.Getenv("SHENMUX_SESSIONS"), "comma-separated discoverable session names")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -731,10 +726,9 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 	if state.DeviceID == "" || len(state.DevicePrivateKey) != ed25519.PrivateKeySize || len(state.DeviceToken) == 0 {
 		return errors.New("agent is not enrolled; run shenmux login --controller URL --code CODE")
 	}
-	metadata := relay.AgentMetadata{Cluster: *cluster, Namespace: *namespace, Workload: *workload, Pod: *pod, Node: *node, Harness: *harness, Orchestrator: *orchestrator}
-	kind := "harness"
-	if *orchestrator {
-		kind = "orchestrator"
+	metadata := relay.AgentMetadata{}
+	if len(labels) > 0 {
+		metadata.Labels = labels
 	}
 	sessionNames := []string{}
 	if *session != "" {
@@ -747,7 +741,7 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 		}
 	}
 	for _, name := range sessionNames {
-		metadata.Sessions = append(metadata.Sessions, relay.SessionDescriptor{ID: name, Name: name, Kind: kind, Harness: *harness, Interactive: true})
+		metadata.Sessions = append(metadata.Sessions, relay.SessionDescriptor{ID: name, Name: name})
 	}
 	wsURL, err := controllerWebSocketURL(*controller)
 	if err != nil {
@@ -800,13 +794,32 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 	return err
 }
 
-func firstEnv(names ...string) string {
-	for _, name := range names {
-		if value := os.Getenv(name); value != "" {
-			return value
-		}
+// labelFlag collects repeated --label key=value pairs. The values are never
+// read by shenmux; they are advertised to the controller and handed back to
+// whoever asks for the session list.
+type labelFlag map[string]string
+
+func (l labelFlag) String() string {
+	keys := make([]string, 0, len(l))
+	for key := range l {
+		keys = append(keys, key)
 	}
-	return ""
+	sort.Strings(keys)
+	pairs := make([]string, 0, len(keys))
+	for _, key := range keys {
+		pairs = append(pairs, key+"="+l[key])
+	}
+	return strings.Join(pairs, ",")
+}
+
+func (l labelFlag) Set(value string) error {
+	key, label, found := strings.Cut(value, "=")
+	key = strings.TrimSpace(key)
+	if !found || key == "" {
+		return fmt.Errorf("invalid --label %q (want key=value)", value)
+	}
+	l[key] = label
+	return nil
 }
 
 func contains(values []string, want string) bool {

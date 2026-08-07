@@ -33,7 +33,7 @@ encrypted.
 ## Remote development path
 
 ```text
-browser workspace
+browser client
       ↕ WebSocket /browser
 development controller
       ↕ WebSocket /ws (outbound from agent)
@@ -50,7 +50,8 @@ The processes have separate responsibilities:
   tracks control leases, and forwards stream envelopes.
 - The agent reconnects with bounded exponential backoff and maps each remote
   stream to the named local IPC endpoints. It advertises only session names and
-  optional workload metadata supplied on its command line.
+  the opaque `--label key=value` pairs supplied on its command line, which
+  nothing in shenmux reads.
 - The browser asks the controller for a capability, opens a stream, attaches
   to a named session, and consumes the same inner protocol as a local client.
 
@@ -59,9 +60,8 @@ The controller does not start sessions and cannot recover one. Start
 same name with `shenmux agent --session NAME` or `--sessions A,B`.
 
 Controller restart closes all live agent and browser connections. The agent
-reconnects, but the bundled workspace does not automatically reopen its
-browser stream. The PTY continues only while its separate `shenmux run`
-process remains alive.
+reconnects; a browser stream has to be reopened by its client. The PTY
+continues only while its separate `shenmux run` process remains alive.
 
 ## Control plane
 
@@ -142,7 +142,7 @@ inner checkpoint and delta protocol remains authoritative.
 In trusted mode the controller decodes browser-to-agent inner frames to apply
 capability and lease policy. In blind mode endpoint helpers establish an
 authenticated stream cipher and the controller forwards opaque data frames.
-The bundled controller workspace only implements trusted mode. See
+Every bundled client implements trusted mode only. See
 [TRUST-MODEL.md](TRUST-MODEL.md).
 
 The optional direct/Tailscale path changes which address the agent uses for

@@ -15,7 +15,7 @@
 #                        the UI a human should open.
 #
 #   shenmux controller   the relay/controller with --dev-browser-subject. Serves
-#                        /enroll, /sessions and its own basic /workspace UI.
+#                        /enroll, /sessions, /capabilities and /browser. No UI.
 #          ^
 #          |  outbound websocket (ws://.../ws)
 #          |
@@ -406,7 +406,7 @@ start_service agent "$BIN" agent \
   --controller "$CONTROLLER_URL" \
   --transport relay \
   --session "$SESSION" \
-  --harness demo \
+  --label demo=true \
   --control "$CONTROL_ENDPOINT" \
   --data "$DATA_ENDPOINT"
 agent_registered() {
@@ -449,9 +449,6 @@ $(printf '\033[1;32m')================= shenmux demo is up =================$(pr
       colour, blinking cursor. This is the UI to judge the product by.
 
   Also running:
-    $CONTROLLER_URL/workspace?subject=$SUBJECT
-      Controller workspace — the remote path's basic renderer: fixed 80x24,
-      limited keyboard input. Useful to see the relay work, not the good UI.
     $CONTROLLER_URL/sessions?subject=$SUBJECT
       Controller session inventory (JSON) — proves the agent is enrolled.
     $WEB_URL/api/history?session=$SESSION&token=$WEB_TOKEN

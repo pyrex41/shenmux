@@ -95,29 +95,24 @@ type DeviceCredential struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
-// AgentMetadata identifies a workload without exposing terminal contents. It
-// is sent during the authenticated tunnel handshake and is used by the
-// controller's session discovery API.
+// AgentMetadata announces an agent's sessions without exposing terminal
+// contents. It is sent during the authenticated tunnel handshake and is used
+// by the controller's session discovery API.
+//
+// Labels are opaque. shenmux carries them and hands them back; it never reads
+// one, and it has no vocabulary for where the process on the other end runs.
+// Whoever set a label is the only party that knows what it means.
 type AgentMetadata struct {
-	Cluster      string              `json:"cluster,omitempty"`
-	Namespace    string              `json:"namespace,omitempty"`
-	Workload     string              `json:"workload,omitempty"`
-	Pod          string              `json:"pod,omitempty"`
-	Node         string              `json:"node,omitempty"`
-	Harness      string              `json:"harness,omitempty"`
-	Orchestrator bool                `json:"orchestrator,omitempty"`
-	Labels       map[string]string   `json:"labels,omitempty"`
-	Sessions     []SessionDescriptor `json:"sessions,omitempty"`
+	Labels   map[string]string   `json:"labels,omitempty"`
+	Sessions []SessionDescriptor `json:"sessions,omitempty"`
 }
 
-// SessionDescriptor is the discoverable identity of one PTY or orchestrator
-// session attached to an agent. The controller never stores terminal data.
+// SessionDescriptor is the discoverable identity of one PTY attached to an
+// agent. Every session shenmux knows about is a terminal. The controller never
+// stores terminal data.
 type SessionDescriptor struct {
-	ID          string `json:"id"`
-	Name        string `json:"name,omitempty"`
-	Kind        string `json:"kind,omitempty"` // terminal, harness, orchestrator
-	Harness     string `json:"harness,omitempty"`
-	Interactive bool   `json:"interactive,omitempty"`
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
 }
 
 func (c DeviceCredential) Validate(now time.Time) error {

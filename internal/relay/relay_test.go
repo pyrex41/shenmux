@@ -258,12 +258,12 @@ func TestAuthenticatedTunnelEnrollmentAndHandshake(t *testing.T) {
 	}
 	wsURL, _ := url.Parse(httpServer.URL)
 	wsURL.Scheme = "ws"
-	tunnel := Tunnel{URL: wsURL.String() + "/ws", Origin: "test-controller", Credential: cred, PrivateKey: priv, Metadata: AgentMetadata{Cluster: "dev", Namespace: "agents", Workload: "codex", Pod: "codex-0", Harness: "codex", Sessions: []SessionDescriptor{{ID: "shell", Name: "shell", Kind: "harness", Interactive: true}}}, Policy: BackoffPolicy{Initial: time.Millisecond, Maximum: time.Millisecond}}
+	tunnel := Tunnel{URL: wsURL.String() + "/ws", Origin: "test-controller", Credential: cred, PrivateKey: priv, Metadata: AgentMetadata{Labels: map[string]string{"role": "codex", "site": "desk"}, Sessions: []SessionDescriptor{{ID: "shell", Name: "shell"}}}, Policy: BackoffPolicy{Initial: time.Millisecond, Maximum: time.Millisecond}}
 	conn, err := tunnel.Connect(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	request, _ := http.NewRequest(http.MethodGet, httpServer.URL+"/sessions?namespace=agents", nil)
+	request, _ := http.NewRequest(http.MethodGet, httpServer.URL+"/sessions", nil)
 	request.Header.Set("X-Shenmux-Subject", "alice")
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
@@ -277,8 +277,13 @@ func TestAuthenticatedTunnelEnrollmentAndHandshake(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&discovered); err != nil {
 		t.Fatal(err)
 	}
-	if len(discovered) != 1 || discovered[0].Session.ID != "shell" || discovered[0].Metadata.Pod != "codex-0" {
+	if len(discovered) != 1 || discovered[0].Session.ID != "shell" {
 		t.Fatalf("discovered sessions = %+v", discovered)
+	}
+	// Labels survive the handshake byte for byte. The controller carries them
+	// and hands them back; it never reads one and never filters on one.
+	if labels := discovered[0].Metadata.Labels; labels["role"] != "codex" || labels["site"] != "desk" || len(labels) != 2 {
+		t.Fatalf("discovered labels = %+v", discovered[0].Metadata.Labels)
 	}
 	conn.Close()
 	// Enrollment codes are atomically single-use.

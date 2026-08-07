@@ -29,8 +29,8 @@ current behavior and must not weaken the single-PTY-writer contract.
 | Agent identity | Single-use enrollment code, Ed25519 device key/proof, persisted credential | No automatic credential rotation/recovery |
 | Relay | Authenticated outbound agent WebSocket, reconnect backoff, stream envelope/counters, multi-session bridge | Agent bridges separately running sessions; browser does not auto-reattach |
 | Controller policy | Durable JSON grants, capabilities, control leases, revocations, audit metadata; short-lived single-use attach use | Command exposes no real user auth or admin workflow |
-| Discovery | Live advertised session/workload metadata at `/sessions` | Presence is memory-only and not reconciled with actual local processes |
-| Trusted browser | Basic remote workspace, capability issuance, attach, input, checkpoint/delta rendering | Trusted-only and intentionally minimal |
+| Discovery | Live advertised session names and opaque labels at `/sessions` | Presence is memory-only and not reconciled with actual local processes |
+| Trusted browser | Capability issuance, attach, input, checkpoint/delta rendering through `/browser` | Trusted-only; no bundled client attaches through a controller |
 | Blind relay | Endpoint handshake/cipher, binding, replay/downgrade/rotation primitives and tests | No bundled initiating client |
 | Direct transport | Explicit direct endpoint, Tailscale CLI discovery/ping, `auto` fallback | Still a controller endpoint; no live stream migration |
 | Deployment | Example service, Fly, and Kubernetes files | No production image or validated end-to-end deployment |
@@ -90,9 +90,9 @@ becomes deployable only after these gaps close.
 
 ### Remote client quality
 
-9. Bring the controller workspace to feature parity with the local client for
+9. Teach the local browser client to attach through a controller, keeping the
    keyboard input, paste, resize, focus/mouse modes, reconnect, resync, and
-   observe/control UX.
+   observe/control UX it already has locally.
 10. Reconnect with a new capability and full archive after controller/agent
     outage; never queue arbitrary input while disconnected.
 11. Decide how session processes are supervised on an agent host. Do not claim

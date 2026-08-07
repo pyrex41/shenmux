@@ -54,18 +54,6 @@ that.
 after `--` for one shot, or `--keepalive=false`. `shenmux status` prints the
 config, the state directory, and the sessions this binary has started.
 
-### There are two browser UIs. Use the right one.
-
-`shenmux web` serves the real one, from `internal/webui/`: PixiJS renderer,
-full keyboard, resize, colour, paste, mouse modes, blinking cursor.
-
-The controller's `/workspace` (`internal/relay/workspace.js`) is a different,
-much smaller client that exists to exercise enrollment, capabilities and relay
-framing. It handles printable keys, Enter and Backspace, sends no resize, and
-paints plain DOM at whatever size the session already has (80x24 by default). If
-you land there first you will conclude the terminal is broken. It isn't; you are
-in the test harness.
-
 ### Control is exclusive and cannot be stolen
 
 One client holds the input lease at a time. If another client has it, your
@@ -100,8 +88,11 @@ host that owns the PTY:
   --transport relay --session work
 ```
 
-Open <http://127.0.0.1:8788/workspace?subject=local-test> — and re-read the
-two-UIs warning above before you judge it.
+The controller serves no browser UI. `GET /sessions` lists what the connected
+agents advertise — session names and whatever opaque `--label key=value` pairs
+the agent was started with — and `/capabilities` and `/browser` are there for a
+client to use. Teaching the real client (`shenmux web`) to attach through a
+controller is not done yet.
 
 `shenmux login` refuses to enroll over an existing device identity: it names
 the device id at stake and stops rather than overwriting
@@ -140,8 +131,8 @@ Does not:
   the controller.
 - **Blind mode has no client.** The handshake, encryption and tests exist as
   library code. Nothing shipped here initiates it. `login --trust-mode blind`
-  makes the agent reject the bundled workspace, which is the point, but it
-  leaves you with no working browser.
+  makes the agent reject every trusted stream, which is the point, but it
+  leaves you with no browser that can reach it through a controller.
 - **No production hosting and no multi-user story.** The browser identity
   fallback trusts an `X-Shenmux-Subject` header. There is no TLS, no origin
   policy, no rate limiting, no admin workflow for grants or revocation. The

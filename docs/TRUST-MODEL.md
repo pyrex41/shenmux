@@ -53,7 +53,7 @@ them.
 
 ## Trusted relay mode
 
-Trusted mode is the default and is what the bundled controller workspace uses.
+Trusted mode is the default and is what every bundled client uses.
 The controller decodes inner session messages to enforce command type,
 capability permission, session binding, and control lease. Consequently, the
 controller can read terminal contents and input. HTTPS/WSS, when supplied by a
@@ -83,11 +83,10 @@ to attack the session.
 
 Most importantly, the repository does not ship a browser or native executable
 that initiates this blind handshake. The primitives and integration tests are
-available to developers, but blind relay is not an end-user feature of the
-bundled workspace.
+available to developers, but blind relay is not an end-user feature.
 
 Persisting `--trust-mode blind` sets the agent's minimum accepted stream mode.
-It rejects the bundled trusted workspace rather than silently downgrading.
+It rejects a trusted stream rather than silently downgrading.
 
 ## State exposure
 

@@ -1,6 +1,7 @@
 // Package agent bridges authenticated relay streams to sessions hosted by the
-// local muxd instance. A Kubernetes sidecar can therefore share a Unix socket
-// volume with the harness container while exposing the session through WSS.
+// local muxd instance. The bridge needs only a shared Unix socket, so it can
+// run beside the process that owns the PTY and expose the session through WSS
+// without either side knowing how the other was started.
 package agent
 
 import (

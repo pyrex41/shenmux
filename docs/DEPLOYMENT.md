@@ -55,9 +55,9 @@ port. It still needs local access to the session's ZeroMQ sockets. If `run` and
 share a private IPC directory and pass matching `--control` and `--data`
 endpoints.
 
-The browser then opens
-`/workspace?subject=local-test`. The development subject grants wildcard
-observe/control access and must never be enabled on a public listener.
+A browser client would then authenticate with `?subject=local-test`. The
+development subject grants wildcard observe/control access and must never be
+enabled on a public listener.
 
 ### What survives restart
 
@@ -69,8 +69,8 @@ observe/control access and must never be enabled on a public listener.
   running local PTY.
 
 The PTY, checkpoint/tail, connected-agent inventory, and live streams are not
-persisted. Restarting `shenmux run` loses the terminal process. The bundled
-browser workspace also requires a refresh/re-attach after disconnection.
+persisted. Restarting `shenmux run` loses the terminal process. A browser
+client also has to re-attach after disconnection.
 
 ## 3. Production controller
 
