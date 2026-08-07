@@ -135,28 +135,34 @@ agent listener and does not remove controller authentication or routing. For a
 tailnet address, WireGuard supplies hop encryption; use `wss://` as well if
 your deployment requires TLS at the application endpoint.
 
+## The sidecar shape
+
+Where a session already runs inside something else — a container, a job, a
+managed workload — the agent does not have to run inside the same process, and
+should not. Run it beside the session as its own process, sharing exactly one
+thing: the private directory holding that session's ZeroMQ control and data
+sockets, owned by the session's user and mode `0700`. Nothing else is shared,
+and the agent needs no inbound port, because it dials the controller outbound.
+
+That leaves the sidecar two pieces of state: the IPC directory it reads, and
+its own durable `--state-dir` for the device key and credential. The enrollment
+code is neither — a one-time value, supplied at first start and dropped once
+the credential exists. Whoever schedules the workload arranges those three
+things; shenmux has no vocabulary for the scheduler. See [SCOPE.md](SCOPE.md).
+
 ## Checked-in deployment assets
 
 Treat `deploy/` as design material, not an installable distribution.
 
 | Asset | Current reality |
 | --- | --- |
-| `Dockerfile` and root `fly.toml` | Legacy `muxd` image exposing ZeroMQ TCP internally; it does not contain the `shenmux` controller/agent binary |
-| `deploy/fly.toml.example` | Describes an egress-only agent shape but assumes a published image containing `shenmux`; that image is not built here |
+| `Dockerfile` | Builds `shenmux`, `muxd` and `muxctl`; its default environment still starts the legacy `muxd` ZeroMQ-over-TCP shape through `deploy/shenmux-entrypoint`, so a controller or agent has to be invoked explicitly |
 | `deploy/systemd/*.service` | Illustrative hardening baseline; environment/state/IPC ownership and enrollment must be completed for the target host |
-| `deploy/kubernetes/*.yaml` | Architecture fragments; they assume a compatible image, TLS/identity integration, writable durable state, and a separately running session daemon |
 
-In particular, the Kubernetes controller example sets a read-only root
-filesystem without mounting the controller state directory, and the sidecar
-example does not currently pass its mounted `/var/lib/shenmux` as
-`--state-dir`. Apply neither unchanged.
-
-Fly.io, EC2, Hetzner, a home server, and Kubernetes can all host the same
-future controller/agent architecture, but this repository does not claim a
-tested end-to-end deployment for any of them. `make test-deploy` currently
-checks CGO-disabled compilation only. The default runtime has no libzmq or C
-toolchain dependency; only the optional Ghostty adapter needs CGO and external
-headers/library files.
+This repository does not claim a tested end-to-end deployment anywhere.
+`make test-deploy` currently checks CGO-disabled compilation only. The default
+runtime has no libzmq or C toolchain dependency; only the optional Ghostty
+adapter needs CGO and external headers/library files.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for process boundaries and
 [TRUST-MODEL.md](TRUST-MODEL.md) before exposing any interface.

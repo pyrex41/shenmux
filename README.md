@@ -136,7 +136,8 @@ Does not:
 - **No production hosting and no multi-user story.** The browser identity
   fallback trusts an `X-Shenmux-Subject` header. There is no TLS, no origin
   policy, no rate limiting, no admin workflow for grants or revocation. The
-  checked-in Dockerfile and `fly.toml` still package the legacy `muxd` shape.
+  checked-in Dockerfile builds `shenmux`, but its entrypoint still starts the
+  legacy `muxd` shape and no deployment of it is tested.
   See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 - **The controller's session list is memory-only and believes the agent.** It
   lists the names passed to `shenmux agent --session/--sessions`. Nothing

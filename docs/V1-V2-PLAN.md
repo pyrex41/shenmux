@@ -33,7 +33,7 @@ current behavior and must not weaken the single-PTY-writer contract.
 | Trusted browser | Capability issuance, attach, input, checkpoint/delta rendering through `/browser` | Trusted-only; no bundled client attaches through a controller |
 | Blind relay | Endpoint handshake/cipher, binding, replay/downgrade/rotation primitives and tests | No bundled initiating client |
 | Direct transport | Explicit direct endpoint, Tailscale CLI discovery/ping, `auto` fallback | Still a controller endpoint; no live stream migration |
-| Deployment | Example service, Fly, and Kubernetes files | No production image or validated end-to-end deployment |
+| Deployment | Example systemd units and a container image | No production image or validated end-to-end deployment |
 
 ## V1: coherent local release
 
@@ -83,8 +83,8 @@ becomes deployable only after these gaps close.
    claimed.
 6. Define health/readiness semantics, structured logs/metrics, graceful
    upgrades, and rollback.
-7. Build and publish an image that actually contains all advertised roles and
-   correct the systemd, Fly, and Kubernetes examples against it.
+7. Build and publish an image whose entrypoint serves the advertised roles, and
+   correct the systemd examples against it.
 8. Add end-to-end deployment tests. `make test-deploy` must become more than a
    compile check before it can be used as a release gate.
 
