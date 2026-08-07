@@ -21,7 +21,6 @@ import (
 	"github.com/pyrex41/shenmux/internal/history"
 	"github.com/pyrex41/shenmux/internal/protocol"
 	"github.com/pyrex41/shenmux/internal/webui"
-	workspacebackend "github.com/pyrex41/shenmux/internal/workspace"
 )
 
 const commandTimeout = 5 * time.Second
@@ -32,10 +31,6 @@ const commandTimeout = 5 * time.Second
 const (
 	instancePlaceholder = "__SHENMUX_INSTANCE__"
 	tokenPlaceholder    = "__SHENMUX_TOKEN__"
-	// Deliberately distinct from the window property it is assigned to: a
-	// placeholder equal to the property name would be substituted in the
-	// property position instead of the value.
-	workspacePlaceholder = "__SHENMUX_WORKSPACE_CONFIG__"
 )
 
 // Refusal reasons reported on the X-Shenmux-Refusal header and by
@@ -60,11 +55,6 @@ type Config struct {
 	// An empty token means the gateway is open to anything that can reach the
 	// listen address.
 	Token string
-	// WorkspaceStore and WorkspaceAuthorize are optional. When configured,
-	// /workspace-objects exposes the capability-scoped browser object API.
-	// Cloud credentials stay behind this handler and never reach the browser.
-	WorkspaceStore     workspacebackend.Store
-	WorkspaceAuthorize workspacebackend.Authorize
 }
 
 type Server struct {
@@ -116,10 +106,6 @@ func (s *Server) Handler() http.Handler {
 			s.serveIndex(w, r)
 			return
 		}
-		if r.URL.Path == "/workspace" || r.URL.Path == "/workspace/" {
-			s.serveWorkspace(w, r)
-			return
-		}
 		files.ServeHTTP(w, r)
 	})
 	mux := http.NewServeMux()
@@ -130,12 +116,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/instance", s.handleInstance)
 	mux.HandleFunc("/api/history", s.handleHistory)
 	mux.HandleFunc("/ws", s.handleWebSocket)
-	if s.cfg.WorkspaceStore != nil {
-		objects := workspacebackend.Handler(workspacebackend.HTTPConfig{
-			Store: s.cfg.WorkspaceStore, Authorize: s.cfg.WorkspaceAuthorize,
-		})
-		mux.Handle("/workspace-objects/", http.StripPrefix("/workspace-objects", objects))
-	}
 	mux.Handle("/", muxHandler)
 	return mux
 }
@@ -161,30 +141,6 @@ func (s *Server) serveIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// A cached page would reintroduce exactly the staleness this identity is
 	// meant to catch.
-	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write([]byte(page))
-}
-
-// serveWorkspace stamps the remote-store configuration into the workspace page.
-// Without a configured store the value is null, the client falls back to its
-// browser-local OPFS sandbox, and the page says so -- which matters because a
-// local sandbox served from a machine you also have a terminal on looks like
-// that machine's files and is not.
-func (s *Server) serveWorkspace(w http.ResponseWriter, r *http.Request) {
-	data, err := webui.FS.ReadFile("workspace.html")
-	if err != nil {
-		http.Error(w, "workspace unavailable", http.StatusInternalServerError)
-		return
-	}
-	remote := "null"
-	if s.cfg.WorkspaceStore != nil && (s.cfg.Token == "" || s.tokenAccepted(r)) {
-		// The gateway token doubles as the workspace capability: a caller that
-		// may attach to this session may read its workspace, and no other.
-		remote = fmt.Sprintf(`{"baseURL":%q,"capability":%q}`,
-			"/workspace-objects", s.cfg.Token)
-	}
-	page := strings.Replace(string(data), workspacePlaceholder, remote, 1)
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write([]byte(page))
 }
