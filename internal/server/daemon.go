@@ -36,7 +36,6 @@ type Config struct {
 	ExitGrace       time.Duration
 	StoreLimits     protocol.StoreLimits
 	ControlLease    time.Duration
-	HistoryDir      string
 }
 
 type processResult struct {
@@ -134,7 +133,7 @@ func Serve(ctx context.Context, cfg Config) error {
 	runtime, err := NewRuntime(RuntimeConfig{
 		Session: cfg.Session, Dimensions: cfg.Dimensions, PTY: pty,
 		Terminal: terminal, Publisher: publisher,
-		StoreLimits: cfg.StoreLimits, ControlLease: cfg.ControlLease, HistoryDir: cfg.HistoryDir,
+		StoreLimits: cfg.StoreLimits, ControlLease: cfg.ControlLease,
 	})
 	if err != nil {
 		return err

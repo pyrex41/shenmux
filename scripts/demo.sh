@@ -5,8 +5,7 @@
 # Topology (four processes, all on loopback, all started by this script):
 #
 #   shenmux run          owns the PTY for session $SESSION and binds two IPC
-#                        sockets ($RUN_DIR/$SESSION.{ctl,pub}). Writes a durable
-#                        history checkpoint into $RUN_DIR/history.
+#                        sockets ($RUN_DIR/$SESSION.{ctl,pub}).
 #          |
 #          |  ipc://
 #          v
@@ -89,7 +88,6 @@ done
 BIN="$REPO_DIR/bin/shenmux"
 LOG_DIR="$RUN_DIR/logs"
 PID_DIR="$RUN_DIR/pids"
-HISTORY_DIR="$RUN_DIR/history"
 CONTROL_ENDPOINT="ipc://$RUN_DIR/$SESSION.ctl"
 DATA_ENDPOINT="ipc://$RUN_DIR/$SESSION.pub"
 
@@ -317,7 +315,7 @@ if [ -d "$PID_DIR" ]; then
   CLEANUP_ARMED=1
 fi
 rm -rf "$RUN_DIR"
-mkdir -p "$RUN_DIR" "$LOG_DIR" "$PID_DIR" "$HISTORY_DIR" "$SHENMUX_STATE_DIR"
+mkdir -p "$RUN_DIR" "$LOG_DIR" "$PID_DIR" "$SHENMUX_STATE_DIR"
 # The daemon refuses to bind IPC sockets in a directory with group/other access.
 chmod 700 "$RUN_DIR" "$SHENMUX_STATE_DIR"
 ok "clean run dir ready"
@@ -364,8 +362,7 @@ step "3. SESSION  ($SESSION)"
 start_service session "$BIN" run \
   --session "$SESSION" \
   --control "$CONTROL_ENDPOINT" \
-  --data "$DATA_ENDPOINT" \
-  --history-dir "$HISTORY_DIR"
+  --data "$DATA_ENDPOINT"
 session_ready() { [ -S "$RUN_DIR/$SESSION.ctl" ] && [ -S "$RUN_DIR/$SESSION.pub" ]; }
 wait_for "IPC sockets bound ($RUN_DIR/$SESSION.{ctl,pub})" "$READY_TIMEOUT" session_ready \
   || fail_with_log session "the session never bound its IPC sockets"
@@ -424,15 +421,11 @@ start_service web "$BIN" web \
   --listen "127.0.0.1:$WEB_PORT" \
   --control "$CONTROL_ENDPOINT" \
   --data "$DATA_ENDPOINT" \
-  --history-dir "$HISTORY_DIR" \
   --token "$WEB_TOKEN"
 wait_for "gateway answers /healthz" "$READY_TIMEOUT" GET "$WEB_URL/healthz" \
   || fail_with_log web "the local gateway never answered /healthz"
 wait_for "gateway serves the PixiJS client at /" "$READY_TIMEOUT" GET "$WEB_OPEN_URL" \
   || fail_with_log web "the local gateway never served its index page"
-history_live() { GET "$WEB_URL/api/history?session=$SESSION&token=$WEB_TOKEN" | grep -q "\"session\":\"$SESSION\""; }
-wait_for "history API has a checkpoint for '$SESSION'" "$READY_TIMEOUT" history_live \
-  || fail_with_log web "the history API never returned a checkpoint"
 
 # ---------------------------------------------------------------------------
 # Summary
@@ -451,8 +444,6 @@ $(printf '\033[1;32m')================= shenmux demo is up =================$(pr
   Also running:
     $CONTROLLER_URL/sessions?subject=$SUBJECT
       Controller session inventory (JSON) — proves the agent is enrolled.
-    $WEB_URL/api/history?session=$SESSION&token=$WEB_TOKEN
-      Durable session history (JSON) served by the local gateway.
 
   Terminal client instead of a browser:
     ./bin/muxctl -session $SESSION -control $CONTROL_ENDPOINT -data $DATA_ENDPOINT

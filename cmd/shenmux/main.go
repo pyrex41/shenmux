@@ -115,7 +115,6 @@ func runLocal(ctx context.Context, args []string, _ io.Writer, stderr io.Writer)
 	keepalive := flags.Bool("keepalive", true, "restart the default login shell after it exits")
 	grace := flags.Duration("exit-grace", 150*time.Millisecond, "time to leave sockets open after command exit")
 	stateDir := flags.String("state-dir", "", "persistent state directory")
-	historyDir := flags.String("history-dir", "", "durable session history directory (defaults under state-dir)")
 	flags.Usage = func() {
 		fmt.Fprintln(flags.Output(), "usage: shenmux run [flags] [-- command [args...]]")
 		flags.PrintDefaults()
@@ -167,13 +166,6 @@ func runLocal(ctx context.Context, args []string, _ io.Writer, stderr io.Writer)
 			return fmt.Errorf("resolve state directory: %w", err)
 		}
 	}
-	if *historyDir == "" {
-		*historyDir = filepath.Join(paths.StateDir, "history")
-	} else if resolved, resolveErr := filepath.Abs(*historyDir); resolveErr != nil {
-		return fmt.Errorf("resolve history directory: %w", resolveErr)
-	} else {
-		*historyDir = resolved
-	}
 	if err := recordSession(paths, *session, nil); err != nil {
 		return err
 	}
@@ -184,11 +176,24 @@ func runLocal(ctx context.Context, args []string, _ io.Writer, stderr io.Writer)
 		}
 	}()
 	logger := log.New(stderr, "", 0)
+	noteAbandonedHistory(logger, filepath.Join(paths.StateDir, "history"))
 	logger.Printf("shenmux session=%s control=%s data=%s command=%q", *session, *control, *data, command)
 	return server.Serve(ctx, server.Config{
 		Session: *session, ControlEndpoint: *control, DataEndpoint: *data,
-		Dimensions: dimensions, Command: command, Env: os.Environ(), ExitGrace: *grace, HistoryDir: *historyDir,
+		Dimensions: dimensions, Command: command, Env: os.Environ(), ExitGrace: *grace,
 	})
+}
+
+// noteAbandonedHistory tells the operator about session archives an older
+// build wrote under the state directory. shenmux no longer writes them and
+// nothing can restore one into a live session, but they are the operator's
+// files, so this says where they are and leaves them alone.
+func noteAbandonedHistory(logger *log.Logger, dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) == 0 {
+		return
+	}
+	logger.Printf("shenmux: %s holds session archives from an older build; shenmux no longer writes or reads them and the directory can be deleted", dir)
 }
 
 func recordSession(paths appstate.Paths, name string, stoppedAt *time.Time) error {
@@ -479,7 +484,6 @@ func runWeb(ctx context.Context, args []string, _ io.Writer, stderr io.Writer) e
 	listen := flags.String("listen", "127.0.0.1:8787", "HTTP listen address")
 	control := flags.String("control", "", "muxd control endpoint")
 	data := flags.String("data", "", "muxd data endpoint")
-	historyDir := flags.String("history-dir", "", "durable session history directory (optional)")
 	token := flags.String("token", os.Getenv("SHENMUX_WEB_TOKEN"), "access token required to attach (generated when empty)")
 	noToken := flags.Bool("no-token", false, "serve without an access token; anything that can reach --listen may attach")
 	if err := flags.Parse(args); err != nil {
@@ -517,7 +521,7 @@ func runWeb(ctx context.Context, args []string, _ io.Writer, stderr io.Writer) e
 		}
 	}
 	webCfg := webgateway.Config{
-		Session: *session, ControlEndpoint: *control, DataEndpoint: *data, HistoryDir: *historyDir,
+		Session: *session, ControlEndpoint: *control, DataEndpoint: *data,
 		Token: accessToken,
 	}
 	gateway := webgateway.New(ctx, webCfg)

@@ -145,7 +145,13 @@ Does not:
   when the controller restarts.
 - **No Windows PTY.** Linux and macOS, Go 1.26+.
 - **Nothing survives the session.** Kill `shenmux run` or reboot its host and
-  the PTY is gone. Checkpoints and deltas are in memory.
+  the PTY is gone. Checkpoints and deltas are in memory and are never written
+  to disk. Earlier builds did write them: every accepted event was archived
+  under `<state-dir>/history`, which defaulted to
+  `~/.local/state/shenmux/history`. That is gone. If a previous build left
+  archives there, `shenmux run` names the directory once on startup and
+  otherwise ignores it; nothing can restore one into a live session, so delete
+  it when you see it.
 
 The default build is pure Go: no CGO, no libzmq, no C toolchain. `-tags
 libghostty` swaps in the libghostty-vt terminal adapter and needs both.

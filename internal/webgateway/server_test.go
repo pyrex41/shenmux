@@ -83,7 +83,7 @@ func TestStaleInstanceIsRefused(t *testing.T) {
 }
 
 // The token is defence in depth for the same hijack: with one set, only a
-// caller that has the printed URL may attach or read history.
+// caller that has the printed URL may attach.
 func TestTokenGatesAccessWhenSet(t *testing.T) {
 	srv := New(context.Background(), Config{
 		Session: "test", ControlEndpoint: "ipc:///tmp/x.ctl", DataEndpoint: "ipc:///tmp/x.pub",
