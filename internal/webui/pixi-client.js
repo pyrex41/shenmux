@@ -1,6 +1,7 @@
 import { Application, BitmapFont, BitmapText, Container, Graphics } from "pixi.js";
 import Shen from "shen-script";
 import { instanceEndpoint, pageIdentity, refusalVerdict, socketURL } from "./gateway.mjs";
+import { fitGrid, renderScale } from "./fit.mjs";
 
 (() => {
   "use strict";
@@ -9,14 +10,19 @@ import { instanceEndpoint, pageIdentity, refusalVerdict, socketURL } from "./gat
   const FONT_NAMES = { regular: "ShenmuxMono", bold: "ShenmuxMonoBold", italic: "ShenmuxMonoItalic", boldItalic: "ShenmuxMonoBoldItalic" };
   const FONT_SIZE = 15;
   const LINE_HEIGHT = 19;
-  const MAX_COLS = 120;
-  const MAX_ROWS = 48;
+  // Long enough that a window drag or an orientation change settles before the
+  // PTY is asked to resize, short enough that the grid follows the window.
+  const FIT_DEBOUNCE_MS = 120;
   // Identity stamped into this page by the gateway that served it. A tab left
   // open from a previous `shenmux web` process carries the previous instance
   // id and is refused rather than silently taking over the new session.
   const { instance: PAGE_INSTANCE, token: PAGE_TOKEN } = pageIdentity(document);
   const wrap = document.querySelector("#screen-wrap");
   const host = document.querySelector("#pixi-host");
+  // A canvas cannot summon a touch keyboard. This field can, and it is where a
+  // phone composes a line before the terminal sees any of it.
+  const compose = document.querySelector("#compose");
+  const softKeys = document.querySelector("#soft-keys");
   const empty = document.querySelector("#empty");
   const status = document.querySelector("#status");
   const sessionLabel = document.querySelector("#session");
@@ -42,6 +48,16 @@ import { instanceEndpoint, pageIdentity, refusalVerdict, socketURL } from "./gat
   let scrollPixels = 0;
   let rendererWidth = 0;
   let rendererHeight = 0;
+  // The box the grid has to live inside, in CSS pixels, and the factor the
+  // canvas is presented at so that it does. Measured on resize rather than
+  // per frame: reading layout during a render is what makes a paint expensive.
+  let usableWidth = 0;
+  let usableHeight = 0;
+  let presentedScale = 0;
+  let fitTimer;
+  // The last grid this client asked the PTY for. Without it a resize is
+  // re-sent on every tick until the round trip lands.
+  let requestedGrid = "";
   // Reconnects always begin with a fresh checkpoint. Keep the previous view
   // visible while offline, but never apply deltas from the old stream to it.
   let reconnectTimer;
@@ -112,6 +128,10 @@ import { instanceEndpoint, pageIdentity, refusalVerdict, socketURL } from "./gat
       frame = blankFrame(delta.Cols, delta.Rows);
       state.screen.Frame = frame;
       markAllRows();
+      // Whatever this client last asked for, the terminal has since been some
+      // other shape — possibly at another client's request. Holding on to the
+      // old request would make the next fit believe it had already been sent.
+      requestedGrid = "";
     }
     for (const line of (delta.Lines || [])) {
       frame.Lines[line.Y] = line.Cells;
@@ -229,24 +249,51 @@ import { instanceEndpoint, pageIdentity, refusalVerdict, socketURL } from "./gat
     for (let i = runs.length; i < view.runs.length; i++) view.runs[i].visible = false;
   }
 
+  // The content box of the terminal pane. clientWidth still counts the
+  // padding, and counting columns against the padded width is what drew the
+  // grid past the window edge; it also excludes any scrollbar, which is the
+  // conservative direction to be wrong in.
+  function measureUsable() {
+    const style = getComputedStyle(wrap);
+    const horizontal = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+    const vertical = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+    usableWidth = Math.max(0, wrap.clientWidth - horizontal);
+    usableHeight = Math.max(0, wrap.clientHeight - vertical);
+  }
+
+  // The grid is rendered at its natural size and presented at whatever
+  // fraction of it the window can hold. Scaling in CSS rather than in the
+  // scene keeps the backing store at full device resolution, so a shrunk
+  // terminal resamples a sharp image instead of drawing small glyphs.
+  function presentGrid(cols, rows) {
+    if (usableWidth <= 0 || usableHeight <= 0) measureUsable();
+    const width = cols * cellW;
+    const height = rows * lineH;
+    const scale = renderScale({ width: usableWidth, height: usableHeight, cols, rows, cellWidth: cellW, lineHeight: lineH });
+    if (width === rendererWidth && height === rendererHeight && scale === presentedScale) return;
+    if (width !== rendererWidth || height !== rendererHeight) {
+      rendererWidth = width;
+      rendererHeight = height;
+      app.renderer.resize(width, height);
+    }
+    presentedScale = scale;
+    app.canvas.style.width = `${width * scale}px`;
+    app.canvas.style.height = `${height * scale}px`;
+    markAllRows(); // a resized renderer comes back cleared
+  }
+
   function renderFrame() {
     if (blocked) return; // keep the refusal on screen instead of a dead frame
     const frame = state?.screen?.Frame;
     if (!frame?.Lines) { empty.hidden = false; return; }
     empty.hidden = true;
     setupGrid(frame.Cols, frame.Rows);
+    const width = frame.Cols * cellW;
+    const height = frame.Rows * lineH;
+    presentGrid(frame.Cols, frame.Rows);
     if (!dirtyRows.size) return;
     const defaultBG = color(frame.DefaultBG, 0x080b10);
     const defaultFG = color(frame.DefaultFG, 0xd7e0ea);
-    const width = frame.Cols * cellW;
-    const height = frame.Rows * lineH;
-    if (width !== rendererWidth || height !== rendererHeight) {
-      rendererWidth = width;
-      rendererHeight = height;
-      app.renderer.resize(width, height);
-      app.canvas.style.width = `${width}px`;
-      app.canvas.style.height = `${height}px`;
-    }
     background.clear().rect(0, 0, width, height).fill(defaultBG);
     const history = state.screen.History || [];
     const totalRows = history.length + frame.Rows;
@@ -322,7 +369,7 @@ import { instanceEndpoint, pageIdentity, refusalVerdict, socketURL } from "./gat
       setStatus(state.control_owner === clientID ? "connected · control" : "connected", true);
       refreshControlButtons();
       scheduleRender();
-      resizeForViewport();
+      applyFit();
       return;
     }
     if (message.type === "delta" || message.type === "control" || message.type === "exit") {
@@ -333,12 +380,17 @@ import { instanceEndpoint, pageIdentity, refusalVerdict, socketURL } from "./gat
       lastSeq = message.seq;
       refreshControlButtons();
       scheduleRender();
+      // Taking the lease is the moment this client becomes allowed to shape
+      // the PTY, and the window it is looking at may not be the shape the
+      // previous holder left behind.
+      if (message.type === "control") scheduleFit();
       return;
     }
     if (message.type === "command") {
       if (state && message.meta) state.control_owner = message.meta.control_owner || "";
       setStatus(state?.control_owner === clientID ? "connected · control" : "connected", true);
       refreshControlButtons();
+      scheduleFit();
       return;
     }
     if (message.type === "error") setStatus(`error · ${message.error || "server error"}`);
@@ -361,9 +413,13 @@ import { instanceEndpoint, pageIdentity, refusalVerdict, socketURL } from "./gat
   function mousePoint(event) {
     const frame = state?.screen?.Frame;
     const rect = app.canvas.getBoundingClientRect();
+    // The canvas is presented at presentedScale, so a CSS pixel is worth that
+    // much less of a cell. Reporting unscaled cells would put the click
+    // somewhere to the right of where the user pressed.
+    const scale = presentedScale || 1;
     return {
-      x: Math.max(1, Math.min(frame.Cols, Math.floor((event.clientX - rect.left) / cellW) + 1)),
-      y: Math.max(1, Math.min(frame.Rows, Math.floor((event.clientY - rect.top) / lineH) + 1)),
+      x: Math.max(1, Math.min(frame.Cols, Math.floor((event.clientX - rect.left) / (cellW * scale)) + 1)),
+      y: Math.max(1, Math.min(frame.Rows, Math.floor((event.clientY - rect.top) / (lineH * scale)) + 1)),
     };
   }
 
@@ -385,12 +441,58 @@ import { instanceEndpoint, pageIdentity, refusalVerdict, socketURL } from "./gat
     return true;
   }
 
-  function resizeForViewport() {
+  const holdsControl = () => Boolean(state && clientID && state.control_owner === clientID);
+
+  // Two things happen here, and only one of them is anybody else's business.
+  // Every client re-presents its own canvas to fit its own window. Only the
+  // client holding the input lease asks the PTY to become that shape: resize
+  // carries the same permission as input (mux.accept-resize?), and an observer
+  // that sent one would either be rejected or, worse, reshape the terminal
+  // under the person actually working in it.
+  function applyFit() {
+    fitTimer = undefined;
+    measureUsable();
     if (!state) return;
-    const cols = Math.max(1, Math.min(MAX_COLS, Math.floor((wrap.clientWidth - 4) / cellW)));
-    const rows = Math.max(1, Math.min(MAX_ROWS, Math.floor((wrap.clientHeight - 4) / lineH)));
     const frame = state.screen.Frame;
-    if (cols !== frame.Cols || rows !== frame.Rows) sendCommand("resize", { cols, rows });
+    if (!holdsControl()) {
+      // Not this client's terminal to shape. Forget any request made while it
+      // was, so regaining the lease asks again rather than assuming.
+      requestedGrid = "";
+    } else {
+      const { cols, rows } = fitGrid({ width: usableWidth, height: usableHeight, cellWidth: cellW, lineHeight: lineH });
+      const grid = `${cols}x${rows}`;
+      if (cols === frame.Cols && rows === frame.Rows) requestedGrid = "";
+      else if (grid !== requestedGrid) {
+        requestedGrid = grid;
+        sendCommand("resize", { cols, rows });
+      }
+    }
+    scheduleRender();
+  }
+
+  function scheduleFit() {
+    if (fitTimer) clearTimeout(fitTimer);
+    fitTimer = setTimeout(applyFit, FIT_DEBOUNCE_MS);
+  }
+
+  // A canvas takes focus without raising a touch keyboard, so where the
+  // pointer is coarse the compose field takes it instead.
+  const touchInput = () => Boolean(window.matchMedia?.("(pointer: coarse)").matches);
+  function focusTerminal() {
+    const target = compose.hidden ? app.canvas : softKeys;
+    target.focus({ preventScroll: true });
+  }
+
+  // An on-screen keyboard shrinks the visual viewport without touching the
+  // layout viewport, so a page sized in vh keeps its bottom half underneath
+  // the keyboard. Publishing the visible height lets the grid live above it.
+  // Pinch zoom moves the same numbers and means nothing of the sort, so it is
+  // left to the layout viewport.
+  function trackVisualViewport() {
+    const viewport = window.visualViewport;
+    if (!viewport) return;
+    const zoomed = Math.abs(viewport.scale - 1) > 0.01;
+    document.documentElement.style.setProperty("--app-height", zoomed ? "100dvh" : `${Math.round(viewport.height)}px`);
   }
 
   async function start() {
@@ -441,25 +543,77 @@ import { instanceEndpoint, pageIdentity, refusalVerdict, socketURL } from "./gat
     }
 
     const jumpToLive = () => { if (scrollPixels !== 0) { scrollPixels = 0; markAllRows(); scheduleRender(); } };
-    app.canvas.addEventListener("keydown", (event) => {
+    const sendText = (data) => {
       jumpToLive();
+      // Bracketed paste is what tells a program that several lines arrived as
+      // one act rather than as a person pressing return between them.
+      const multiline = data.includes("\n") && terminalModes().BracketedPaste;
+      sendCommand("input", { data: multiline ? `\x1b[200~${data}\x1b[201~` : data });
+    };
+    app.canvas.addEventListener("keydown", (event) => {
       const data = keyData(event);
       if (!data) return;
       event.preventDefault();
+      jumpToLive();
       sendCommand("input", { data });
     });
     app.canvas.addEventListener("paste", (event) => {
       event.preventDefault();
+      sendText(event.clipboardData.getData("text/plain"));
+    });
+
+    // The compose field, and the reason it is a buffer rather than a wire.
+    // Dictation does not type: it inserts a guess and then rewrites it as
+    // later words arrive, so streaming what the field holds would spell each
+    // revision out at the prompt — visible, ugly, and enough to set a coding
+    // agent running on half a sentence. Nothing leaves here until the person
+    // says it is finished.
+    compose.hidden = !touchInput();
+    // Dictated prose is longer than a shell line and worth seeing all of.
+    // Growing the field also shrinks the terminal pane, which the fit picks up
+    // and turns into fewer rows rather than a hidden prompt.
+    const resizeCompose = () => {
+      softKeys.style.height = "auto";
+      softKeys.style.height = `${softKeys.scrollHeight}px`;
+    };
+    softKeys.addEventListener("input", resizeCompose);
+    const submitCompose = () => {
+      const text = softKeys.value;
+      softKeys.value = "";
+      resizeCompose();
+      // An empty send is the return key, which is how a phone answers a
+      // prompt that is waiting for one.
+      sendText(`${text}\r`);
+      softKeys.focus({ preventScroll: true });
+    };
+    // Keys that steer a program rather than write into a sentence. A physical
+    // keyboard attached to a tablet still needs to interrupt, escape and walk
+    // the shell's history while the compose field holds focus.
+    const STEERING_KEYS = new Set(["Escape", "Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End"]);
+    compose.addEventListener("submit", (event) => {
+      event.preventDefault();
+      submitCompose();
+    });
+    softKeys.addEventListener("keydown", (event) => {
+      // Mid-composition keydowns describe the IME's own editing, not input.
+      if (event.isComposing || event.keyCode === 229) return;
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        submitCompose();
+        return;
+      }
+      if (!event.ctrlKey && !event.altKey && !STEERING_KEYS.has(event.key)) return;
+      const data = keyData(event);
+      if (!data) return;
+      event.preventDefault();
       jumpToLive();
-      const data = event.clipboardData.getData("text/plain");
-      const wrapped = terminalModes().BracketedPaste ? `\x1b[200~${data}\x1b[201~` : data;
-      sendCommand("input", { data: wrapped });
+      sendCommand("input", { data });
     });
     app.canvas.addEventListener("pointerdown", (event) => {
       if (!terminalModes().Mouse) return;
       event.preventDefault();
       app.canvas.setPointerCapture?.(event.pointerId);
-      app.canvas.focus();
+      focusTerminal();
       sendMouse(event, event.button);
     });
     app.canvas.addEventListener("pointerup", (event) => {
@@ -474,17 +628,33 @@ import { instanceEndpoint, pageIdentity, refusalVerdict, socketURL } from "./gat
       event.preventDefault();
       sendMouse(event, event.buttons ? Math.max(0, Math.log2(event.buttons) | 0) : 3);
     });
-    app.canvas.addEventListener("focus", () => {
-      if (terminalModes().FocusEvents) sendCommand("input", { data: "\x1b[I" });
-    });
-    app.canvas.addEventListener("blur", () => {
-      if (terminalModes().FocusEvents) sendCommand("input", { data: "\x1b[O" });
-    });
-    app.canvas.addEventListener("click", () => app.canvas.focus());
+    for (const target of [app.canvas, softKeys]) {
+      target.addEventListener("focus", () => {
+        if (terminalModes().FocusEvents) sendCommand("input", { data: "\x1b[I" });
+      });
+      target.addEventListener("blur", () => {
+        if (terminalModes().FocusEvents) sendCommand("input", { data: "\x1b[O" });
+      });
+    }
+    // Anywhere in the pane, not just on the glyphs: on a phone this tap is the
+    // only way to raise the keyboard, and the grid rarely fills the pane.
+    wrap.addEventListener("click", focusTerminal);
     acquireButton.addEventListener("click", () => sendCommand("acquire"));
     releaseButton.addEventListener("click", () => sendCommand("release"));
     refreshControlButtons();
-    new ResizeObserver(() => setTimeout(resizeForViewport, 80)).observe(wrap);
+    // Three sources, one debounced answer: the pane's own layout, the window
+    // (orientation changes arrive here), and the visual viewport, which is the
+    // only one that moves when a phone opens its keyboard.
+    new ResizeObserver(scheduleFit).observe(wrap);
+    window.addEventListener("resize", scheduleFit);
+    window.addEventListener("orientationchange", scheduleFit);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", () => {
+        trackVisualViewport();
+        scheduleFit();
+      });
+    }
+    trackVisualViewport();
     wrap.addEventListener("wheel", (event) => {
       if (sendMouse(event, 0, false, true)) {
         event.preventDefault();
@@ -505,7 +675,10 @@ import { instanceEndpoint, pageIdentity, refusalVerdict, socketURL } from "./gat
       socket.onopen = () => {
         reconnectDelay = 250;
         setStatus(shen ? "connected · shen · pixi" : "connected · pixi", true);
-        app.canvas.focus();
+        // Not on touch: focusing there raises the keyboard, and a page that
+        // opens with half the terminal behind a keyboard nobody asked for is
+        // worse than one waiting for a tap.
+        if (!touchInput()) app.canvas.focus();
       };
       socket.onmessage = (event) => {
         try { onMessage(JSON.parse(event.data)); }

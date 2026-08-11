@@ -4,14 +4,12 @@ These files illustrate intended process shapes; they are not a supported or
 tested distribution.
 
 - `systemd/` sketches separate controller and outbound-agent services.
-- `fly.toml.example` sketches an egress-only agent with durable state.
-- `kubernetes/` sketches a controller and an agent sidecar sharing local IPC
-  with a separately running session daemon.
+- `shenmux-entrypoint` is the container entrypoint; it starts the legacy `muxd`
+  daemon, so running a controller or agent from the image means overriding it.
 
-They assume an image containing the `shenmux` binary, real TLS and browser
-identity integration, corrected durable state paths, and an enrollment
-workflow. The root `Dockerfile` currently builds only the legacy `muxd` image,
-so it cannot run these controller/agent examples.
+They assume real TLS and browser identity integration, durable state paths
+appropriate to the host, and an enrollment workflow. The root `Dockerfile`
+builds `shenmux` alongside `muxd` and `muxctl`.
 
 Review the limitations and production checklist in
 [`docs/DEPLOYMENT.md`](../docs/DEPLOYMENT.md) before adapting any file.

@@ -35,7 +35,6 @@ import (
 	"github.com/pyrex41/shenmux/internal/shenguard"
 	transportpkg "github.com/pyrex41/shenmux/internal/transport"
 	"github.com/pyrex41/shenmux/internal/webgateway"
-	workspacebackend "github.com/pyrex41/shenmux/internal/workspace"
 )
 
 var (
@@ -116,7 +115,6 @@ func runLocal(ctx context.Context, args []string, _ io.Writer, stderr io.Writer)
 	keepalive := flags.Bool("keepalive", true, "restart the default login shell after it exits")
 	grace := flags.Duration("exit-grace", 150*time.Millisecond, "time to leave sockets open after command exit")
 	stateDir := flags.String("state-dir", "", "persistent state directory")
-	historyDir := flags.String("history-dir", "", "durable session history directory (defaults under state-dir)")
 	flags.Usage = func() {
 		fmt.Fprintln(flags.Output(), "usage: shenmux run [flags] [-- command [args...]]")
 		flags.PrintDefaults()
@@ -168,13 +166,6 @@ func runLocal(ctx context.Context, args []string, _ io.Writer, stderr io.Writer)
 			return fmt.Errorf("resolve state directory: %w", err)
 		}
 	}
-	if *historyDir == "" {
-		*historyDir = filepath.Join(paths.StateDir, "history")
-	} else if resolved, resolveErr := filepath.Abs(*historyDir); resolveErr != nil {
-		return fmt.Errorf("resolve history directory: %w", resolveErr)
-	} else {
-		*historyDir = resolved
-	}
 	if err := recordSession(paths, *session, nil); err != nil {
 		return err
 	}
@@ -185,11 +176,24 @@ func runLocal(ctx context.Context, args []string, _ io.Writer, stderr io.Writer)
 		}
 	}()
 	logger := log.New(stderr, "", 0)
+	noteAbandonedHistory(logger, filepath.Join(paths.StateDir, "history"))
 	logger.Printf("shenmux session=%s control=%s data=%s command=%q", *session, *control, *data, command)
 	return server.Serve(ctx, server.Config{
 		Session: *session, ControlEndpoint: *control, DataEndpoint: *data,
-		Dimensions: dimensions, Command: command, Env: os.Environ(), ExitGrace: *grace, HistoryDir: *historyDir,
+		Dimensions: dimensions, Command: command, Env: os.Environ(), ExitGrace: *grace,
 	})
+}
+
+// noteAbandonedHistory tells the operator about session archives an older
+// build wrote under the state directory. shenmux no longer writes them and
+// nothing can restore one into a live session, but they are the operator's
+// files, so this says where they are and leaves them alone.
+func noteAbandonedHistory(logger *log.Logger, dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) == 0 {
+		return
+	}
+	logger.Printf("shenmux: %s holds session archives from an older build; shenmux no longer writes or reads them and the directory can be deleted", dir)
 }
 
 func recordSession(paths appstate.Paths, name string, stoppedAt *time.Time) error {
@@ -480,10 +484,8 @@ func runWeb(ctx context.Context, args []string, _ io.Writer, stderr io.Writer) e
 	listen := flags.String("listen", "127.0.0.1:8787", "HTTP listen address")
 	control := flags.String("control", "", "muxd control endpoint")
 	data := flags.String("data", "", "muxd data endpoint")
-	historyDir := flags.String("history-dir", "", "durable session history directory (optional)")
 	token := flags.String("token", os.Getenv("SHENMUX_WEB_TOKEN"), "access token required to attach (generated when empty)")
 	noToken := flags.Bool("no-token", false, "serve without an access token; anything that can reach --listen may attach")
-	workspaceDir := flags.String("workspace-dir", "", "directory the /workspace page reads and writes; empty leaves it a browser-local sandbox")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -519,29 +521,8 @@ func runWeb(ctx context.Context, args []string, _ io.Writer, stderr io.Writer) e
 		}
 	}
 	webCfg := webgateway.Config{
-		Session: *session, ControlEndpoint: *control, DataEndpoint: *data, HistoryDir: *historyDir,
+		Session: *session, ControlEndpoint: *control, DataEndpoint: *data,
 		Token: accessToken,
-	}
-	if *workspaceDir != "" {
-		// Without this the /workspace page is a browser-local OPFS sandbox.
-		// Serving that beside a terminal into this machine invites the reading
-		// that the file pane shows this machine's files, which it does not.
-		root, err := filepath.Abs(*workspaceDir)
-		if err != nil {
-			return fmt.Errorf("resolve workspace directory: %w", err)
-		}
-		if err := os.MkdirAll(root, 0o700); err != nil {
-			return fmt.Errorf("create workspace directory: %w", err)
-		}
-		webCfg.WorkspaceStore = workspacebackend.NewLocalStore(root)
-		// The gateway token is the capability: whoever may attach to this
-		// session may read its workspace, and nobody else. With no token
-		// configured the gateway is already open, so the workspace matches it.
-		token := accessToken
-		webCfg.WorkspaceAuthorize = func(capability, _, _ string) bool {
-			return token == "" || capability == token
-		}
-		fmt.Fprintf(stderr, "shenmux web workspace=%s\n", root)
 	}
 	gateway := webgateway.New(ctx, webCfg)
 	server := &http.Server{Addr: *listen, Handler: gateway.Handler()}
@@ -615,14 +596,9 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 	reconnectMaximum := flags.Duration("reconnect-maximum", 0, "maximum reconnect delay (persisted)")
 	reconnectFactor := flags.Float64("reconnect-factor", 0, "reconnect exponential factor (persisted)")
 	reconnectJitter := flags.Float64("reconnect-jitter", -1, "reconnect jitter fraction, 0 to 1 (persisted)")
-	cluster := flags.String("cluster", os.Getenv("SHENMUX_CLUSTER"), "Kubernetes cluster identity")
-	namespace := flags.String("namespace", firstEnv("SHENMUX_NAMESPACE", "POD_NAMESPACE"), "Kubernetes namespace")
-	workload := flags.String("workload", os.Getenv("SHENMUX_WORKLOAD"), "Kubernetes workload name")
-	pod := flags.String("pod", firstEnv("SHENMUX_POD", "POD_NAME"), "Kubernetes pod name")
-	node := flags.String("node", firstEnv("SHENMUX_NODE", "NODE_NAME"), "Kubernetes node name")
-	harness := flags.String("harness", os.Getenv("SHENMUX_HARNESS"), "agent harness name (codex, claude, pi, or custom)")
-	orchestrator := flags.Bool("orchestrator", false, "mark this agent as an orchestrator")
-	session := flags.String("session", os.Getenv("SHENMUX_SESSION"), "discoverable PTY/harness session name")
+	labels := labelFlag{}
+	flags.Var(labels, "label", "opaque key=value label advertised to the controller, repeatable")
+	session := flags.String("session", os.Getenv("SHENMUX_SESSION"), "discoverable PTY session name")
 	sessions := flags.String("sessions", os.Getenv("SHENMUX_SESSIONS"), "comma-separated discoverable session names")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -754,10 +730,9 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 	if state.DeviceID == "" || len(state.DevicePrivateKey) != ed25519.PrivateKeySize || len(state.DeviceToken) == 0 {
 		return errors.New("agent is not enrolled; run shenmux login --controller URL --code CODE")
 	}
-	metadata := relay.AgentMetadata{Cluster: *cluster, Namespace: *namespace, Workload: *workload, Pod: *pod, Node: *node, Harness: *harness, Orchestrator: *orchestrator}
-	kind := "harness"
-	if *orchestrator {
-		kind = "orchestrator"
+	metadata := relay.AgentMetadata{}
+	if len(labels) > 0 {
+		metadata.Labels = labels
 	}
 	sessionNames := []string{}
 	if *session != "" {
@@ -770,7 +745,7 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 		}
 	}
 	for _, name := range sessionNames {
-		metadata.Sessions = append(metadata.Sessions, relay.SessionDescriptor{ID: name, Name: name, Kind: kind, Harness: *harness, Interactive: true})
+		metadata.Sessions = append(metadata.Sessions, relay.SessionDescriptor{ID: name, Name: name})
 	}
 	wsURL, err := controllerWebSocketURL(*controller)
 	if err != nil {
@@ -823,13 +798,32 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 	return err
 }
 
-func firstEnv(names ...string) string {
-	for _, name := range names {
-		if value := os.Getenv(name); value != "" {
-			return value
-		}
+// labelFlag collects repeated --label key=value pairs. The values are never
+// read by shenmux; they are advertised to the controller and handed back to
+// whoever asks for the session list.
+type labelFlag map[string]string
+
+func (l labelFlag) String() string {
+	keys := make([]string, 0, len(l))
+	for key := range l {
+		keys = append(keys, key)
 	}
-	return ""
+	sort.Strings(keys)
+	pairs := make([]string, 0, len(keys))
+	for _, key := range keys {
+		pairs = append(pairs, key+"="+l[key])
+	}
+	return strings.Join(pairs, ",")
+}
+
+func (l labelFlag) Set(value string) error {
+	key, label, found := strings.Cut(value, "=")
+	key = strings.TrimSpace(key)
+	if !found || key == "" {
+		return fmt.Errorf("invalid --label %q (want key=value)", value)
+	}
+	l[key] = label
+	return nil
 }
 
 func contains(values []string, want string) bool {

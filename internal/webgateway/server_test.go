@@ -7,8 +7,6 @@ import (
 	"net/url"
 	"strings"
 	"testing"
-
-	workspacebackend "github.com/pyrex41/shenmux/internal/workspace"
 )
 
 func TestHandlerServesEmbeddedClient(t *testing.T) {
@@ -18,9 +16,6 @@ func TestHandlerServesEmbeddedClient(t *testing.T) {
 		want string
 	}{
 		{path: "/", want: "<!doctype html>"},
-		{path: "/workspace", want: "shenmux workspace"},
-		{path: "/workspace-runtime.js", want: "RemoteObjectBackend"},
-		{path: "/workspace-component.js", want: "shenmux:workspace/runtime"},
 		{path: "/app.bundle.js", want: "WebSocket"},
 		{path: "/style.css", want: "terminal-wrap"},
 	} {
@@ -88,7 +83,7 @@ func TestStaleInstanceIsRefused(t *testing.T) {
 }
 
 // The token is defence in depth for the same hijack: with one set, only a
-// caller that has the printed URL may attach or read history.
+// caller that has the printed URL may attach.
 func TestTokenGatesAccessWhenSet(t *testing.T) {
 	srv := New(context.Background(), Config{
 		Session: "test", ControlEndpoint: "ipc:///tmp/x.ctl", DataEndpoint: "ipc:///tmp/x.pub",
@@ -130,79 +125,4 @@ func TestServedPageCarriesThisInstance(t *testing.T) {
 	if strings.Contains(body, instancePlaceholder) {
 		t.Fatal("the placeholder must be substituted, not served literally")
 	}
-}
-
-func TestHandlerMountsCapabilityWorkspace(t *testing.T) {
-	store := workspacebackend.NewLocalStore(t.TempDir())
-	server := New(context.Background(), Config{
-		WorkspaceStore: store,
-		WorkspaceAuthorize: func(capability, operation, path string) bool {
-			return capability == "cap" && operation == "list" && path == "/"
-		},
-	})
-	req := httptest.NewRequest(http.MethodGet, "/workspace-objects/manifest?path=/", nil)
-	req.Header.Set("Authorization", "Bearer cap")
-	res := httptest.NewRecorder()
-	server.Handler().ServeHTTP(res, req)
-	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), `"entries"`) {
-		t.Fatalf("workspace manifest = %d %s", res.Code, res.Body.String())
-	}
-}
-
-// The workspace page must say which files it is showing. A browser-local
-// sandbox served from a machine you also have a terminal into looks exactly
-// like that machine's files, so the page carries the remote configuration and
-// the client states the mode; a page that quietly claims to be local while
-// serving a real directory is the bug this pins.
-func TestWorkspacePageCarriesItsMode(t *testing.T) {
-	t.Run("without a store it is browser-local", func(t *testing.T) {
-		srv := New(context.Background(), Config{
-			Session: "test", ControlEndpoint: "ipc:///tmp/x.ctl", DataEndpoint: "ipc:///tmp/x.pub",
-		})
-		req := httptest.NewRequest(http.MethodGet, "/workspace", nil)
-		res := httptest.NewRecorder()
-		srv.Handler().ServeHTTP(res, req)
-
-		body := res.Body.String()
-		if !strings.Contains(body, "= null;") {
-			t.Fatal("with no store configured the page must carry a null remote config")
-		}
-		if strings.Contains(body, workspacePlaceholder) {
-			t.Fatal("the placeholder must be substituted, not served literally")
-		}
-	})
-
-	t.Run("with a store it carries the capability", func(t *testing.T) {
-		srv := New(context.Background(), Config{
-			Session: "test", ControlEndpoint: "ipc:///tmp/x.ctl", DataEndpoint: "ipc:///tmp/x.pub",
-			WorkspaceStore: workspacebackend.NewLocalStore(t.TempDir()),
-			Token:          "sekrit",
-		})
-		req := httptest.NewRequest(http.MethodGet, "/workspace?token=sekrit", nil)
-		res := httptest.NewRecorder()
-		srv.Handler().ServeHTTP(res, req)
-
-		body := res.Body.String()
-		if !strings.Contains(body, `"baseURL":"/workspace-objects"`) || !strings.Contains(body, `"capability":"sekrit"`) {
-			t.Fatalf("the page must carry the remote config, got %q", body)
-		}
-		if strings.Contains(body, workspacePlaceholder) {
-			t.Fatal("the placeholder must be substituted, not served literally")
-		}
-	})
-
-	t.Run("a caller without the token gets no capability", func(t *testing.T) {
-		srv := New(context.Background(), Config{
-			Session: "test", ControlEndpoint: "ipc:///tmp/x.ctl", DataEndpoint: "ipc:///tmp/x.pub",
-			WorkspaceStore: workspacebackend.NewLocalStore(t.TempDir()),
-			Token:          "sekrit",
-		})
-		req := httptest.NewRequest(http.MethodGet, "/workspace", nil)
-		res := httptest.NewRecorder()
-		srv.Handler().ServeHTTP(res, req)
-
-		if strings.Contains(res.Body.String(), "sekrit") {
-			t.Fatal("the workspace capability must not be handed to a caller that did not present the token")
-		}
-	})
 }

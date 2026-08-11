@@ -5,9 +5,8 @@ COPY go.mod go.sum ./
 COPY . .
 
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/muxd ./cmd/muxd
-# The controller/agent deployment examples need the shenmux binary, not just
-# the legacy muxd daemon. Without this the manifests in deploy/kubernetes
-# reference an image that cannot run them.
+# The image carries the shenmux binary, not just the legacy muxd daemon, so
+# `controller` and `agent` can be run from it by overriding the entrypoint.
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/shenmux ./cmd/shenmux
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/muxctl ./cmd/muxctl
 

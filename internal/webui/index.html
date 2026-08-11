@@ -2,7 +2,9 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <!-- interactive-widget: an on-screen keyboard shrinks the page instead of
+         sliding it up, so the terminal stays whole above it. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
     <title>shenmux</title>
     <!-- Stamped per request by internal/webgateway. A tab left open from a
          previous gateway process keeps the old values and is refused. -->
@@ -24,6 +26,18 @@
         <div id="pixi-host"></div>
         <div class="empty" id="empty" hidden></div>
       </section>
+      <!-- Shown only where the pointer is coarse. A canvas cannot raise an
+           on-screen keyboard, and a phone keyboard does not deliver keys: it
+           delivers words, and dictation revises words it has already
+           delivered. So a touch device composes here, reviews what the
+           recognizer settled on, and sends a line at a time. Physical
+           keyboards keep streaming through the canvas. -->
+      <form class="compose" id="compose" hidden>
+        <textarea id="soft-keys" class="compose-text" rows="1" enterkeyhint="send"
+                  aria-label="compose a line for the terminal" autocapitalize="none"
+                  autocomplete="off" placeholder="type or dictate, then send"></textarea>
+        <button type="submit" id="send">send ⏎</button>
+      </form>
       <footer class="bottombar">
         <span id="details">screen —</span>
         <span class="hint">click terminal, type normally · ⌘K clears browser focus</span>

@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 BIN_DIR ?= bin
 
-.PHONY: all build web-build web-audit web-test workspace-component-build workspace-component-test workspace-runtime-test workspace-test golem-workspace-build test test-relay test-deploy race vet guards guard-check audit shen bifrost check clean install demo
+.PHONY: all build web-build web-audit web-test test test-relay test-deploy race vet guards guard-check audit shen bifrost check clean install demo
 
 all: check build
 
@@ -17,23 +17,6 @@ web-audit:
 web-test:
 	node --test 'internal/webui/*.test.mjs'
 
-workspace-component-build:
-	cargo build --manifest-path runtime/workspace-component/Cargo.toml --target wasm32-wasip2 --release
-	node web/node_modules/@bytecodealliance/jco/src/jco.js transpile runtime/workspace-component/target/wasm32-wasip2/release/shenmux_workspace_component.wasm --out-dir runtime/workspace-component/generated --name workspace_component
-	cd web && node build-workspace.mjs
-
-workspace-component-test: workspace-component-build
-	node scripts/test-workspace-component.mjs
-
-workspace-runtime-test:
-	node scripts/test-workspace-runtime.mjs
-
-workspace-test: workspace-component-test workspace-runtime-test
-
-golem-workspace-build:
-	command -v golem >/dev/null || (echo "golem CLI is required for the experimental workspace agent" >&2; exit 1)
-	cd runtime/golem-workspace && golem build --yes
-
 build: web-build
 	mkdir -p $(BIN_DIR)
 	go build -o $(BIN_DIR)/shenmux ./cmd/shenmux
@@ -45,7 +28,7 @@ test:
 	go test ./...
 
 test-relay:
-	go test ./internal/relay ./internal/policy ./internal/appstate ./internal/transport ./internal/update ./cmd/shenmux
+	go test ./internal/relay ./internal/policy ./internal/appstate ./internal/transport ./cmd/shenmux
 
 test-deploy:
 	CGO_ENABLED=0 go build ./cmd/shenmux ./cmd/muxd ./cmd/muxctl ./cmd/shenmux-web

@@ -32,19 +32,6 @@ func TestControllerHealthz(t *testing.T) {
 	}
 }
 
-func TestControllerWorkspaceAssets(t *testing.T) {
-	server := httptest.NewServer(NewController(nil, "test-controller"))
-	defer server.Close()
-	resp, err := http.Get(server.URL + "/workspace")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != "text/html; charset=utf-8" {
-		t.Fatalf("workspace response: status=%d content-type=%q", resp.StatusCode, resp.Header.Get("Content-Type"))
-	}
-}
-
 type policyControllerFixture struct {
 	controller *Controller
 	server     *httptest.Server

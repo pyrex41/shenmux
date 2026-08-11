@@ -36,29 +36,15 @@ npm run build --prefix web
 `make build` and `make check` also run the web build. Use the locked dependency
 versions in `web/package-lock.json` for reproducible output.
 
-## Controller workspace
+## Controller
 
-`shenmux controller` serves a separate, smaller workspace at `/workspace`.
-It lists session metadata advertised by connected agents, requests a control
-capability, and relays the local protocol through `/browser`.
+`shenmux controller` serves no browser UI. It lists the sessions connected
+agents advertise at `GET /sessions`, issues capabilities at `/capabilities`,
+and relays the local protocol through `/browser`, for a client to use. There is
+not yet a client that uses them; teaching the PixiJS client to attach through a
+controller is open work.
 
 For local development:
-The `/workspace` prototype is a browser-local workspace backed by the Origin
-Private File System (OPFS). It provides instant local file operations and a
-small command surface (`ls`, `cat`, `write`, `mkdir`, and friends). The command
-reducer is a WASI Component Model guest, transpiled for the browser with JCO.
-The guest imports a host virtual filesystem; the browser host keeps an OPFS
-cache, loads cold files with HTTP ranges, and journals writes for asynchronous
-remote sync. Remote synchronization is optional, so the default path remains
-offline/local. See [WORKSPACE-RUNTIME.md](WORKSPACE-RUNTIME.md) for the
-capability-scoped object service and Golem durability seam.
-
-The browser can opt into a remote workspace by setting
-`globalThis.__SHENMUX_WORKSPACE_REMOTE__` before loading `/workspace`:
-
-```js
-{ baseURL: "/workspace-objects", capability: "short-lived-capability" }
-```
 
 The demo shell also removes an inherited `NO_COLOR=1` setting and advertises
 `COLORTERM=truecolor`; otherwise applications such as Claude Code may disable
@@ -71,11 +57,11 @@ color before the browser ever receives a styled cell.
   --dev-browser-subject local-test
 ```
 
-After enrolling an agent and advertising a live session, open:
-
-```text
-http://127.0.0.1:8788/workspace?subject=local-test
-```
+After enrolling an agent and advertising a live session, `GET /sessions` lists
+what that agent announced: session names, and whatever opaque `--label
+key=value` pairs it was started with. The controller carries labels and hands
+them back. It does not read them and does not filter on them; a client that
+wants a subset selects one itself.
 
 The `subject` query parameter works only when it exactly matches
 `--dev-browser-subject`. Enabling it creates a wildcard observe/control grant
@@ -84,20 +70,8 @@ hook, the controller also accepts `X-Shenmux-Subject`; a production reverse
 proxy would have to remove all client-supplied copies and inject a verified
 identity. This integration is not provided in the command.
 
-The controller workspace currently:
-
-- uses trusted relay mode only;
-- requests control permission rather than offering an observe-only choice;
-- supports basic printable keys, Enter, and Backspace;
-- does not send browser resize, mouse, paste, focus, or complete special-key
-  sequences;
-- does not automatically reconnect and reattach after a controller, agent, or
-  network interruption;
-- renders a simple DOM representation rather than the local PixiJS client.
-
-It is useful for exercising enrollment, discovery, capabilities, relay
-framing, and checkpoint/delta flow. It is not the production version of the
-local browser UI.
+The relay path is exercised by the `internal/relay` tests rather than by a
+shipped page.
 
 ## Browser state and reconnects
 
@@ -106,9 +80,9 @@ bounded delta tail. Live deltas then carry consecutive sequence numbers. A
 client that sees a gap can ask the session for another full archive.
 
 The local browser client has resync behavior while its WebSocket remains
-connected. The bundled controller workspace does not implement automatic
-socket reconnect. Refreshing it obtains current inventory and a new,
-single-use capability, then attaches from a fresh archive.
+connected. A client attaching through a controller obtains current inventory
+and a new, single-use capability on each load, then attaches from a fresh
+archive.
 
 Neither browser stores a durable terminal log. If `shenmux run` exits, there
 is no PTY to reconnect to.
