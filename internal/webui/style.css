@@ -9,12 +9,25 @@
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); }
-body { font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
-.app { height: 100%; display: grid; grid-template-rows: 48px minmax(0, 1fr) 30px; }
-.topbar, .bottombar { display: flex; align-items: center; justify-content: space-between; padding: 0 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+body { font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; overscroll-behavior: none; }
+/* The single column is explicit because an implicit one is sized to its
+   content: a canvas wider than the window would widen the track, push the
+   pane past the window edge, and then be measured against that wider pane —
+   a fit that talks itself into overflowing. */
+.app { height: 100%; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 48px minmax(0, 1fr) auto 30px; }
+/* --app-height is the height a phone's on-screen keyboard leaves visible,
+   published by the client; dvh is the answer everywhere else. */
+@supports (height: 100dvh) { .app { height: var(--app-height, 100dvh); } }
+.topbar, .bottombar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
 .bottombar { border-top: 1px solid var(--line); border-bottom: 0; color: var(--muted); font-size: 11px; }
 .brand, .actions { display: flex; align-items: center; gap: 10px; }
-.brand { font-weight: 700; letter-spacing: .02em; }
+/* The bars are the terminal's frame: they may shorten their own text, but
+   they may not widen the page the terminal was fitted to. What gives is the
+   part a narrow window can afford to lose — the session name and the screen
+   detail, never the controls. */
+.brand { font-weight: 700; letter-spacing: .02em; min-width: 0; }
+#session, #details { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.actions { flex: none; }
 .dot { width: 7px; height: 7px; border-radius: 99px; background: var(--accent); box-shadow: 0 0 12px var(--accent); }
 .muted { color: var(--muted); font-weight: 400; }
 .status { color: var(--muted); }
@@ -22,9 +35,17 @@ button { border: 1px solid #2e6f58; border-radius: 5px; background: #123b2b; col
 button:hover { background: #195239; }
 button.secondary { border-color: var(--line); background: transparent; color: var(--muted); }
 button:disabled { cursor: default; opacity: .45; }
-.terminal-wrap { position: relative; min-height: 0; overflow: auto; padding: 16px; background: #080b10; }
+.terminal-wrap { position: relative; min-width: 0; min-height: 0; overflow: auto; padding: 16px; background: #080b10; }
 canvas { display: block; outline: none; image-rendering: auto; }
 #pixi-host { display: block; outline: none; }
+/* The touch input surface. It is visible on purpose: dictation rewrites what
+   it already said, so the text has to be somewhere the person can read it
+   before it reaches a program that will act on it. */
+.compose { display: flex; align-items: flex-end; gap: 8px; padding: 8px; border-top: 1px solid var(--line); background: var(--panel); }
+.compose[hidden] { display: none; }
+.compose-text { flex: 1 1 auto; min-width: 0; max-height: 30vh; resize: none; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: #0b1017; color: var(--text); font: inherit; }
+.compose-text:focus { outline: 1px solid #2e6f58; }
+.compose button { flex: none; padding: 9px 12px; }
 .empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); pointer-events: none; }
 .empty[hidden] { display: none; }
 .hint { opacity: .7; }
