@@ -18,7 +18,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/pyrex41/shenmux/internal/policy"
-	"github.com/pyrex41/shenmux/internal/protocol"
+	"github.com/pyrex41/shenmux/protocol"
 )
 
 func TestEnvelopeMessageRoundTripPreservesFrames(t *testing.T) {

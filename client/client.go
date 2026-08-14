@@ -9,9 +9,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/pyrex41/shenmux/internal/naming"
-	"github.com/pyrex41/shenmux/internal/protocol"
-	"github.com/pyrex41/shenmux/internal/screen"
+	"github.com/pyrex41/shenmux/naming"
+	"github.com/pyrex41/shenmux/protocol"
+	"github.com/pyrex41/shenmux/screen"
 	"github.com/pyrex41/shenmux/internal/shenguard"
 	"github.com/pyrex41/shenmux/internal/zmqx"
 )
@@ -261,7 +261,7 @@ func (c *Client) Input(ctx context.Context, payload []byte) error {
 
 // SendInput queues input on the ordered control actor and returns once the
 // bytes have been handed to the ZeroMQ socket. Unlike Input, it does not wait
-// for muxd's acknowledgement. This is intended for latency-sensitive clients
+// for the session's acknowledgement. This is intended for latency-sensitive clients
 // such as the browser; control and resize operations should continue to use
 // their acknowledged variants.
 func (c *Client) SendInput(ctx context.Context, payload []byte) error {

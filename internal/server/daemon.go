@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/pyrex41/shenmux/internal/protocol"
+	"github.com/pyrex41/shenmux/protocol"
 	"github.com/pyrex41/shenmux/internal/ptyx"
 	"github.com/pyrex41/shenmux/internal/shenguard"
 	"github.com/pyrex41/shenmux/internal/term"

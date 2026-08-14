@@ -17,7 +17,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/pyrex41/shenmux/client"
-	"github.com/pyrex41/shenmux/internal/protocol"
+	"github.com/pyrex41/shenmux/protocol"
 	"github.com/pyrex41/shenmux/internal/webui"
 )
 
@@ -39,8 +39,8 @@ const (
 	RefusalBadToken      = "bad_token"
 )
 
-// Config describes the existing muxd endpoints the browser gateway connects
-// to. muxd remains the owner of PTYs and terminal interpretation.
+// Config describes the existing session endpoints the browser gateway connects
+// to. shenmux run remains the owner of PTYs and terminal interpretation.
 type Config struct {
 	Session         string
 	ControlEndpoint string

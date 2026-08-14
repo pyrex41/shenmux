@@ -19,7 +19,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/pyrex41/shenmux/internal/policy"
-	"github.com/pyrex41/shenmux/internal/protocol"
+	"github.com/pyrex41/shenmux/protocol"
 )
 
 type enrollmentRecord struct{ expires time.Time }
@@ -480,7 +480,7 @@ func (c *Controller) handleBrowser(w http.ResponseWriter, r *http.Request) {
 	// The agent has to hear that this browser is gone however the stream ends.
 	// A tab that is simply closed sends no CLOSE frame, and a revoked, replayed
 	// or misbound stream never gets the chance to: every one of those leaves the
-	// agent holding a muxd client, an attachment and possibly the exclusive
+	// agent holding a session client, an attachment and possibly the exclusive
 	// control lease for a peer that no longer exists. Sending from the deferred
 	// teardown makes the notification unconditional -- a new `return` in the
 	// loop below cannot forget it -- and mirrors the agent-side teardown in

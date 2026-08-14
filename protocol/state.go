@@ -10,7 +10,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"github.com/pyrex41/shenmux/internal/screen"
+	"github.com/pyrex41/shenmux/screen"
 )
 
 const (

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pyrex41/shenmux/internal/screen"
+	"github.com/pyrex41/shenmux/screen"
 )
 
 func buildFakeGhostty(t *testing.T) string {

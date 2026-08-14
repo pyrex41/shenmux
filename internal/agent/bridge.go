@@ -1,5 +1,5 @@
-// Package agent bridges authenticated relay streams to sessions hosted by the
-// local muxd instance. The bridge needs only a shared Unix socket, so it can
+// Package agent bridges authenticated relay streams to sessions hosted by a
+// local shenmux run process. The bridge needs only a shared Unix socket, so it can
 // run beside the process that owns the PTY and expose the session through WSS
 // without either side knowing how the other was started.
 package agent
@@ -16,7 +16,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	muxclient "github.com/pyrex41/shenmux/client"
-	"github.com/pyrex41/shenmux/internal/protocol"
+	"github.com/pyrex41/shenmux/protocol"
 	"github.com/pyrex41/shenmux/internal/relay"
 )
 
@@ -43,7 +43,7 @@ type stream struct {
 	mu         sync.Mutex
 }
 
-// Bridge multiplexes any number of relay streams onto local muxd sessions.
+// Bridge multiplexes any number of relay streams onto local sessions.
 type Bridge struct {
 	DeviceID string
 	// TrustMode is the minimum content trust mode accepted for remote streams.
@@ -449,7 +449,7 @@ const teardownCallTimeout = time.Second
 // nobody can reach. localClientID derives the local client id from the relay
 // stream id, so a browser that reconnects arrives as a *different* client and
 // can never displace the stale owner: every later client (the rich local web
-// UI, muxctl, anything) then fails AcquireControl with "session control is
+// UI, shenmux attach, anything) then fails AcquireControl with "session control is
 // owned by another client" until the agent process is restarted.
 //
 // So release the lease and detach before closing, in that order. Both calls are
