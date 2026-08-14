@@ -15,9 +15,9 @@ import (
 
 	"github.com/gorilla/websocket"
 	muxclient "github.com/pyrex41/shenmux/client"
-	"github.com/pyrex41/shenmux/internal/protocol"
+	"github.com/pyrex41/shenmux/protocol"
 	"github.com/pyrex41/shenmux/internal/relay"
-	"github.com/pyrex41/shenmux/internal/screen"
+	"github.com/pyrex41/shenmux/screen"
 )
 
 type fakeSession struct {

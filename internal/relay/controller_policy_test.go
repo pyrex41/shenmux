@@ -16,7 +16,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/pyrex41/shenmux/internal/policy"
-	"github.com/pyrex41/shenmux/internal/protocol"
+	"github.com/pyrex41/shenmux/protocol"
 )
 
 func TestControllerHealthz(t *testing.T) {
@@ -168,7 +168,7 @@ func (f *policyControllerFixture) readAgentFrameFor(t *testing.T, streamID strin
 
 // readAgentCloseFor asserts that the controller told the agent streamID is
 // over. Every browser stream must produce exactly one of these, whatever ended
-// it, because the agent releases the control lease and detaches its muxd client
+// it, because the agent releases the control lease and detaches its session client
 // on hearing it.
 func (f *policyControllerFixture) readAgentCloseFor(t *testing.T, streamID string) Envelope {
 	t.Helper()

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/pyrex41/shenmux/internal/protocol"
+	"github.com/pyrex41/shenmux/protocol"
 	"github.com/pyrex41/shenmux/internal/zmqx"
 )
 

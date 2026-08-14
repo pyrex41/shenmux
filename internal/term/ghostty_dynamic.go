@@ -659,7 +659,7 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/pyrex41/shenmux/internal/screen"
+	"github.com/pyrex41/shenmux/screen"
 	"github.com/pyrex41/shenmux/internal/shenguard"
 )
 

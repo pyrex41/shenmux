@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/pyrex41/shenmux/internal/screen"
+	"github.com/pyrex41/shenmux/screen"
 )
 
 func testState(t *testing.T, text string) screen.State {

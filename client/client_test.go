@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pyrex41/shenmux/internal/protocol"
-	"github.com/pyrex41/shenmux/internal/screen"
+	"github.com/pyrex41/shenmux/protocol"
+	"github.com/pyrex41/shenmux/screen"
 	"github.com/pyrex41/shenmux/internal/server"
 	"github.com/pyrex41/shenmux/internal/shenguard"
 )
