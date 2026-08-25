@@ -45,13 +45,25 @@ func Scan(root string, store *Store) ([]Entry, string, error) {
 		var mode, mtime int64
 		size := int64(len(data))
 		if st, ok := d.Info(); ok == nil {
+			// Mode must come from the platform Stat_t when available: we record
+			// the raw POSIX st_mode (e.g. 33188), which fs.FileMode cannot
+			// reproduce, and mode IS part of the canonical entry string.
+			//
+			// Mtime, by contrast, is read via the portable fs.FileInfo. The
+			// syscall.Stat_t mtime field is spelled differently per platform
+			// (Mtim on Linux, Mtimespec on Darwin/BSD), so naming it directly
+			// breaks the build on anything but Linux. st.ModTime().Unix() is
+			// the same value through a portable accessor, and it is what the
+			// fallback branch below already used. This is semantically free:
+			// mtime is deliberately EXCLUDED from CanonicalString and therefore
+			// from the tree hash (see entry.go), so it never affects snapshot
+			// identity, diffing, or dedup.
 			if raw, rok := st.Sys().(*syscall.Stat_t); rok {
 				mode = int64(raw.Mode)
-				mtime = raw.Mtim.Sec
 			} else {
 				mode = int64(st.Mode().Perm())
-				mtime = st.ModTime().Unix()
 			}
+			mtime = st.ModTime().Unix()
 		}
 		entries = append(entries, Entry{
 			Path:  rel,
